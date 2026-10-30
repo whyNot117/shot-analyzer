@@ -1,0 +1,9 @@
+{
+  "name": "shot-analyzer",
+  "private": true,
+  "type": "module",
+  "description": "投篮姿态分析——纯静态站，本文件仅为让 Node 以 ESM 跑 test/ 下的逻辑冒烟测试，网站本身零构建",
+  "scripts": {
+    "test": "node test/logic-test.mjs"
+  }
+}

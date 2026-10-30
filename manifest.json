@@ -1,0 +1,14 @@
+{
+  "name": "投篮姿态分析",
+  "short_name": "投篮分析",
+  "description": "上传侧面投篮视频，本地识别姿态并给出科学改进建议",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

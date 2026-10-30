@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f172a" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <title>投篮姿态分析</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <header>
+    <h1>🏀 投篮姿态分析</h1>
+    <p class="subtitle">上传侧面投篮视频，自动识别姿态并给出报告与对比<span style="opacity:.5;font-size:.85em"> · v5.3</span></p>
+  </header>
+
+  <main>
+    <section id="step-upload" class="card">
+      <h2>1. 选择视频</h2>
+      <label class="upload-btn" for="video-input">📷 选择 / 拍摄视频</label>
+      <input type="file" id="video-input" accept="video/*" hidden />
+      <p class="file-name" id="file-name">未选择文件</p>
+      <details class="profile-box">
+        <summary>👤 我的资料（身高 / 体重 / 年龄，存本机）</summary>
+        <div class="profile-row">
+          <label>身高 <input type="number" id="pf-height" min="100" max="250" placeholder="—" /> cm</label>
+          <label>体重 <input type="number" id="pf-weight" min="25" max="200" placeholder="—" /> kg</label>
+          <label>年龄 <input type="number" id="pf-age" min="6" max="90" placeholder="—" /> 岁</label>
+        </div>
+        <p class="hint">只保存在本机浏览器（不离开设备），用于个性化报告；清除浏览器数据会丢失。</p>
+      </details>
+      <details>
+        <summary>拍摄建议与机位示意（点开查看）</summary>
+        <ul>
+          <li>手机固定不动（靠墙/支架），不要手持跟拍；位于投篮者侧面（垂直于出手方向）</li>
+          <li>全身入镜（头顶到双脚都可见、最好占画面高度一半以上），画面中只有一个人</li>
+          <li>光线充足均匀、不逆光，背景尽量干净；拍摄中不要变焦</li>
+          <li>一段视频包含 <b>1–5 次完整出手</b>效果最好：系统会逐次检测、取中位数，更准也更稳；每次出手之间站直停顿 1–2 秒</li>
+          <li>3–30 秒均可（更长只分析前 30 秒）；60fps 更佳</li>
+        </ul>
+        <div id="guide-slot" class="guide-wrap"></div>
+        <p class="hint">侧面机位看「前后方向」（膝角、出手角、躯干倾），正面机位看「左右方向」（肘内外展、站距、对称）。单个机位分析不完整时，报告会提示补拍，并可在第 4 步融合多段视频。</p>
+      </details>
+    </section>
+
+    <section id="step-analyze" class="card hidden">
+      <h2>2. 分析</h2>
+      <div class="type-row">
+        <label for="shot-type">投篮类型：</label>
+        <select id="shot-type">
+          <option value="auto" selected>自动识别（按是否起跳）</option>
+          <option value="jump">跳投</option>
+          <option value="mid">中投</option>
+          <option value="three">三分</option>
+          <option value="free">罚球</option>
+        </select>
+      </div>
+      <div class="video-wrap" id="video-wrap">
+        <video id="video" playsinline muted preload="metadata"></video>
+        <canvas id="overlay"></canvas>
+      </div>
+      <div class="controls">
+        <button id="btn-play" class="btn" disabled>▶ 播放</button>
+        <button id="btn-analyze" class="btn primary">🧠 开始分析</button>
+      </div>
+      <div class="progress-wrap hidden" id="progress-wrap">
+        <div class="progress-bar"><div id="progress-fill"></div></div>
+        <p id="status-text">加载模型中…</p>
+      </div>
+      <div class="toggles hidden" id="toggles">
+        <label><input type="checkbox" id="tg-skeleton" checked /> 骨架</label>
+        <label><input type="checkbox" id="tg-joints" checked /> 关键点</label>
+        <label><input type="checkbox" id="tg-angles" checked /> 角度</label>
+      </div>
+    </section>
+
+    <section id="step-report" class="card hidden">
+      <h2>3. 姿态报告</h2>
+      <div id="report-body"></div>
+    </section>
+
+    <section id="step-fusion" class="card">
+      <h2>4. 多角度融合（可选）</h2>
+      <p class="hint">单个机位总有盲区：侧面看不到肘内外展与左右对称，正面看不到下蹲深度与出手方向角。按报告下方的补拍建议拍好其他机位，上传到这里，系统会按「每个指标取最合适的机位」自动融合成一份完整报告。</p>
+      <div class="fusion-grid">
+        <div class="fusion-slot">
+          <label class="upload-btn small" for="fusion-input-1">🎥 补拍视频 1</label>
+          <input type="file" id="fusion-input-1" accept="video/*" hidden />
+          <p class="file-name" id="fusion-name-1">未选择</p>
+          <select id="fusion-view-1" class="hidden" title="机位自动判别有误时可手动指定">
+            <option value="side">侧面机位</option>
+            <option value="front">正面机位</option>
+            <option value="oblique">斜侧机位</option>
+          </select>
+          <p class="hint" id="fusion-status-1">建议补拍正面（看肘内外展、站距、对称）</p>
+        </div>
+        <div class="fusion-slot">
+          <label class="upload-btn small" for="fusion-input-2">🎥 补拍视频 2</label>
+          <input type="file" id="fusion-input-2" accept="video/*" hidden />
+          <p class="file-name" id="fusion-name-2">未选择</p>
+          <select id="fusion-view-2" class="hidden" title="机位自动判别有误时可手动指定">
+            <option value="side">侧面机位</option>
+            <option value="front">正面机位</option>
+            <option value="oblique">斜侧机位</option>
+          </select>
+          <p class="hint" id="fusion-status-2">或另一侧面（补全被遮挡的一侧）</p>
+        </div>
+      </div>
+      <div class="controls">
+        <button id="btn-fusion" class="btn primary" disabled>🔀 生成融合报告</button>
+      </div>
+      <p id="fusion-status" class="hint">需先完成第 2 步主视频分析。</p>
+      <div id="fusion-report"></div>
+      <div id="fusion-gaps"></div>
+    </section>
+
+    <section id="step-compare" class="card">
+      <h2>5. 动作对比（可选）</h2>
+      <p class="hint">上传一段参考视频（教练示范或职业球员侧面片段），DTW 逐帧对齐后对比你们的动作差异。</p>
+      <label class="upload-btn" for="ref-input">📎 选择参考视频</label>
+      <input type="file" id="ref-input" accept="video/*" hidden />
+      <div class="controls">
+        <button id="btn-compare" class="btn primary" disabled>🆚 开始对比</button>
+      </div>
+      <p id="cmp-status" class="hint">需先完成第 2 步的分析。</p>
+      <div id="dual-pane" class="hidden">
+        <div class="dual-pane">
+          <div class="pane">
+            <span>我的动作</span>
+            <div class="video-wrap">
+              <video id="dual-my" playsinline muted preload="metadata"></video>
+              <canvas id="dual-my-overlay"></canvas>
+            </div>
+          </div>
+          <div class="pane">
+            <span>参考动作</span>
+            <div class="video-wrap">
+              <video id="ref-video" playsinline muted preload="metadata"></video>
+              <canvas id="ref-overlay"></canvas>
+            </div>
+          </div>
+        </div>
+        <div class="controls">
+          <button id="btn-dual-play" class="btn primary">▶ 同步播放</button>
+        </div>
+        <h3 class="dev-title">逐关节偏差（占身高百分比，越小越接近）</h3>
+        <div id="dev-list"></div>
+        <p id="cmp-advice" class="hint"></p>
+      </div>
+    </section>
+  </main>
+
+  <footer>视频仅在你的浏览器本地处理，不会上传到任何服务器。</footer>
+
+  <video id="fusion-video-1" hidden muted playsinline preload="metadata"></video>
+  <video id="fusion-video-2" hidden muted playsinline preload="metadata"></video>
+
+  <script>
+    // file:// 直接双击打开时，浏览器禁止加载 ES 模块，页面功能全部失效——醒目提示
+    if (location.protocol === "file:") {
+      document.body.insertAdjacentHTML(
+        "afterbegin",
+        '<div class="warn-banner">⚠️ 当前是「直接双击打开」模式，页面功能不可用。请双击项目文件夹里的 <b>启动本地测试.bat</b>（或用任意本地服务器）打开，浏览器地址栏必须以 <b>http://</b> 开头。</div>'
+      );
+    }
+  </script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
