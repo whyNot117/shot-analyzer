@@ -93,7 +93,8 @@ export function makePersonPicker() {
       }
     }
     // 换锁通道（记忆衰减后更大的真实主 / 首帧误锁自纠）：候选远超站高记忆才放行；
-    // 换锁时刻记下被顶下者的印象，给原主留认回通道
+    // 换锁时刻记下被顶下者的印象，给原主留认回通道。印象 = 最近一次被顶下的持锁者
+    // （??= 保留更早的印象）；首帧误锁自纠时记录的就是误锁者本身——那时还没有真原主
     if (lock) {
       const big = info.reduce(bySize);
       if (big.size > lock.size * SWITCH_RATIO) {
