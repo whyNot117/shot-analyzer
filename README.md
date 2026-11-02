@@ -45,26 +45,25 @@ python -m http.server   # 需要装过 Python
 
 本地开发模式（server.mjs）会屏蔽 `sw.js`，不注册 Service Worker——改完代码刷新即是最新，不会被旧缓存坑到。
 
-首次打开会从 CDN 下载识别模型（约 5–10 MB），之后浏览器会缓存。
+识别模型与推理引擎（约 25 MB）已随站点**自托管**（`model/` + `vendor/`），首次打开从本站下载——国内手机网络也能直连，无需访问国外 CDN；之后由 Service Worker 缓存，离线可用。
 
 ## 部署到手机可访问（免费）
 
-**方式一：GitHub 网页上传（不需要安装任何工具）**
-1. 注册/登录 GitHub → 右上角 + → New repository，名称如 `shot-analyzer`，选 Public → Create
-2. 在空仓库页点 "uploading an existing file"
-3. 把本项目**所有文件**（保持文件夹结构）拖进上传区 → Commit changes
-4. 仓库 Settings → Pages → Branch 选 `main` / root → Save
-5. 约 1 分钟后访问 `https://<你的用户名>.github.io/shot-analyzer/`
-6. 手机浏览器打开 → 分享/菜单 → "添加到主屏幕"，即可像 App 一样离线使用
-
-**方式二：git 命令行**（如果装了 git）
+**方式一：git 命令行（推荐——本机仓库已提交好，两条命令即可推）**
 ```bash
 cd shot-analyzer
-git init && git add -A && git commit -m "投篮姿态分析网站"
 git remote add origin https://github.com/<你的用户名>/shot-analyzer.git
 git push -u origin main
 ```
-然后同样开启 Settings → Pages。
+推送时浏览器会弹 GitHub 授权窗，点一下即可。然后开 Settings → Pages → Branch 选 `main` / root → Save，约 1 分钟后访问 `https://<你的用户名>.github.io/shot-analyzer/`。手机浏览器打开 → 分享/菜单 → "添加到主屏幕"，即可像 App 一样离线使用。
+
+**方式二：GitHub 网页上传（不装任何工具）**
+1. 注册/登录 GitHub → 右上角 + → New repository，名称如 `shot-analyzer`，选 Public → Create
+2. 在空仓库页点 "uploading an existing file"
+3. 把本项目**所有文件**（保持文件夹结构）拖进上传区 → Commit changes
+   （最大单文件是 `vendor/wasm/` 下两个约 9.4 MB 的 WASM，均在网页上传 25 MB 上限内）
+4. 仓库 Settings → Pages → Branch 选 `main` / root → Save
+5. 约 1 分钟后访问 `https://<你的用户名>.github.io/shot-analyzer/`
 
 ## 目录结构
 
@@ -76,10 +75,17 @@ shot-analyzer/
 ├── icon.svg        应用图标
 ├── package.json    仅为让 Node 跑测试（网站本身零构建，不依赖它）
 ├── css/style.css   样式（深色移动端优先）
-├── test/
-│   └── logic-test.mjs  纯逻辑模块冒烟测试（无需浏览器）
+├── model/          自托管识别模型（pose_landmarker_lite.task，约 5.5 MB）
+├── vendor/         自托管 MediaPipe 推理引擎（tasks-vision.mjs + WASM，约 19 MB）
+├── docs/           投篮理解笔记（指标设计与校准依据）
+├── test/           四套 Node 测试（无需浏览器）
+│   ├── logic-test.mjs      核心逻辑 75 断言（机位/周期/指标/融合/评分/picker）
+│   ├── boundary-check.mjs  锁定器边界 4 场景（远走/抖动/走近/横移）
+│   ├── gap-check.mjs       人物离场空档 5 场景
+│   └── round5-final.mjs    第五轮对抗审查 38 检查（回归+突破+端到端）
 └── js/
-    ├── pose.js     MediaPipe 模型加载与封装
+    ├── pose.js     MediaPipe 模型加载与封装（指向自托管 vendor/model）
+    ├── media.js    多人锁定 makePersonPicker（ghost 认回）+ HEVC 嗅探
     ├── draw.js     骨架绘制、角度计算（含宽高比校正）、自动选边
     ├── views.js    机位判别、识别质量评估、拍摄机位示意图
     ├── metrics.js  投篮周期检测 + 13 项生物力学指标（侧面/正面分机位）
@@ -91,7 +97,10 @@ shot-analyzer/
 ## 改代码后跑测试
 
 ```bash
-node test/logic-test.mjs   # 或 npm test
+node test/logic-test.mjs       # 或 npm test；以下三套是补充场景
+node test/boundary-check.mjs
+node test/gap-check.mjs
+node test/round5-final.mjs
 ```
 
 用合成关键点数据在 Node 里直接验证机位判别、周期检测（含正面换侧重试）、指标门控、融合合并与评分引擎，无需打开浏览器。
