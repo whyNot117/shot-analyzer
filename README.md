@@ -74,6 +74,9 @@ shot-analyzer/
 ├── sw.js           Service Worker（应用+模型缓存，离线可用）
 ├── icon.svg        应用图标
 ├── package.json    仅为让 Node 跑测试（网站本身零构建，不依赖它）
+├── server.mjs      零依赖本地测试服务器（node server.mjs，端口 5500 起顺延）
+├── 启动本地测试.bat  双击即启动本地服务器并打开浏览器
+├── .gitignore      排除本地运行产物（服务器日志、node_modules）
 ├── css/style.css   样式（深色移动端优先）
 ├── model/          自托管识别模型（pose_landmarker_lite.task，约 5.5 MB）
 ├── vendor/         自托管 MediaPipe 推理引擎（tasks-vision.mjs + WASM，约 19 MB）
