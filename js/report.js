@@ -1,5 +1,5 @@
 // 评分规则引擎与报告渲染：指标 → 评分/评级 → 针对性中文建议（不依赖任何外部服务）
-import { JUMP_MIN } from "./metrics.js";
+import { JUMP_MIN, TREND_ONLY } from "./metrics.js";
 
 export const TYPE_LABEL = { jump: "跳投", mid: "中投", free: "罚球", three: "三分" };
 
@@ -101,6 +101,12 @@ function tipId(m, type) {
   return m.id;
 }
 
+// 「较上次」差值的显示格式：数值越大越不需要小数位（角度类 100° 以上不带 .0）
+function formatDelta(delta) {
+  const s = Math.abs(delta) >= 100 ? delta.toFixed(0) : delta.toFixed(1);
+  return delta > 0 ? `+${s}` : s;
+}
+
 export function buildReport(metrics, type, cycleCount = 1) {
   // 自动识别：三分/中投/跳投的评分标准相同（都要求起跳），真正要区分的只有罚球（贴地）——
   // 起跳幅度本身就是测量值，按中位数直接判定即可
@@ -147,13 +153,25 @@ export function renderReport(el, report, opts = {}) {
   const vIcon = { good: "✅", warn: "⚠️", bad: "❌", info: "ℹ️" };
   const count = (v) => report.metrics.filter((m) => m.verdict === v).length;
   const canJump = (f) => f != null && !!opts.jump; // 只有主报告接了回看监听，才显示点击跳转
+  const compare = opts.compare ?? {}; // 由 app.js 用 compareMetric 算好：{ [指标id]: {prev, delta, better, count} }
+
+  // 「较上次」标记：箭头跟数值增减（↑ 就是比上次大），颜色跟「变好/变差」（better 字段）——
+  // 头部晃动、重心横移这类越小越好的指标，数值下降才是变好，颜色不能跟着数值走
+  const trendTag = (m) => {
+    const c = compare[m.id];
+    if (!c || c.delta == null || !isFinite(c.delta) || c.delta === 0) return "";
+    const better = c.better === true;
+    return `<small class="m-trend ${better ? "good" : "bad"}">${c.delta > 0 ? "↑" : "↓"} 比上次 ${formatDelta(c.delta)}${
+      TREND_ONLY.has(m.id) ? "（趋势）" : ""
+    }</small>`;
+  };
 
   const rows = report.metrics
     .map(
       (m) => `
       <div class="metric-row ${m.verdict}">
         <span class="m-name">${m.name}${m.src ? ` <i class="m-src">${m.src}</i>` : ""}</span>
-        <span class="m-value">${m.value}<small>参考 ${m.rangeText}</small></span>
+        <span class="m-value">${m.value}<small>参考 ${m.rangeText}</small>${trendTag(m)}</span>
         <span class="m-icon">${vIcon[m.verdict]}</span>
       </div>`
     )
@@ -184,6 +202,7 @@ export function renderReport(el, report, opts = {}) {
       <div class="summary-text">
         <h3>${report.title ?? (report.autoType ? `自动识别：按${TYPE_LABEL[report.type]}标准` : `${TYPE_LABEL[report.type]}姿态评分`)}</h3>
         <p>${count("good")} 项达标 · ${count("warn")} 项待改进 · ${count("bad")} 项需重点纠正${count("info") ? ` · ${count("info")} 项趋势参考` : ""}${report.cycleCount > 1 ? ` · 共 ${report.cycleCount} 次出手（指标取中位数）` : ""}</p>
+        ${opts.compareSummary ? `<p class="compare-line">${opts.compareSummary}</p>` : ""}
         ${pfBits.length ? `<p class="profile-line">${pfBits.join(" · ")}</p>` : ""}
       </div>
     </div>

@@ -349,6 +349,10 @@ export const METRIC_VIEWS = {
 // 趋势参考型指标：运动学上可测但缺少专项文献阈值，不计分，靠训练档案的历史趋势看变化
 export const TREND_ONLY = new Set(["legArmDelay", "legSeq", "lateralBalance"]);
 
+// 越小越好的指标：训练档案的「较上次」对比按数值增减方向判断好坏会判反，
+// 这类指标（头部晃动、重心横移、腿臂分离时差）差值方向与好坏方向相反
+export const LOWER_IS_BETTER = new Set(["headDrift", "balance", "legArmDelay"]);
+
 /**
  * 计算单次出手的投篮姿态指标。type: "jump" | "free" | "three"；view: "side" | "front" | "oblique" | "unknown"。
  * 矢状面指标（膝角/出手角等）只在侧面类机位下计算；正面指标（肘内外展/站距/左右重心）只在正面类机位下计算；

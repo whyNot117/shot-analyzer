@@ -149,6 +149,19 @@
         <p id="cmp-advice" class="hint"></p>
       </div>
     </section>
+
+    <section id="step-history" class="card">
+      <h2>6. 训练档案</h2>
+      <p class="hint">每次分析自动存入本机浏览器，可看评分历史与单指标趋势，并导出/导入到其他设备。档案与视频一样只留在本机，不上传任何服务器。</p>
+      <div id="history-body"></div>
+      <div class="controls history-controls">
+        <button id="btn-history-export" class="btn">⬇️ 导出</button>
+        <button id="btn-history-import" class="btn">⬆️ 导入</button>
+        <button id="btn-history-clear" class="btn">🗑️ 清空</button>
+        <input type="file" id="history-file" accept="application/json,.json" hidden />
+      </div>
+      <p id="history-status" class="hint"></p>
+    </section>
   </main>
 
   <footer>视频仅在你的浏览器本地处理，不会上传到任何服务器。</footer>

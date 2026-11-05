@@ -3,7 +3,9 @@
 // 隐私模式/清缓存会丢数据，所以提供 JSON 导出与导入，档案不困死在浏览器里。
 //
 // 记录结构：
-// { id, ts, date, type, view, source, score, grade, cycleCount, metrics: { [指标id]: {num, value, unit, verdict, name} } }
+// { id, ts, date, type, view, source, score, grade, cycleCount,
+//   metrics: { [指标id]: {num, value, unit, verdict, name, lo, hi} } }
+// lo/hi 一并存下来：历史记录里只有 num 的话，训练档案的趋势图画不出该指标的 good 参考带。
 
 export const HISTORY_KEY = "shot-analyzer-history-v1";
 export const MAX_RECORDS = 200; // 只留最近 200 次，localStorage 容量有限
@@ -160,7 +162,10 @@ export function summarize(records) {
 export function makeRecord({ report, metrics, ts = Date.now(), source = "主视频", view = "unknown" }) {
   const map = {};
   for (const m of metrics ?? report?.metrics ?? []) {
-    map[m.id] = { num: m.num, value: m.value, unit: m.unit, verdict: m.verdict, name: m.name };
+    map[m.id] = {
+      num: m.num, value: m.value, unit: m.unit, verdict: m.verdict, name: m.name,
+      lo: m.lo, hi: m.hi, // 指标 good 区间——趋势图的参考带靠它
+    };
   }
   const d = new Date(ts);
   const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;

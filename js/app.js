@@ -1,11 +1,16 @@
 // 应用主流程：选视频 → 逐帧扫描姿态 → 播放时叠加骨架
 import { getLandmarker, resetLandmarker, nextTimestamp, beginScan } from "./pose.js";
 import { drawFrame, pickSide, pickShootingSide, SIDE } from "./draw.js";
-import { detectShotCycles, mergeCycles, computeMetrics, standingBodyHeight, METRIC_NAMES, METRIC_VIEWS } from "./metrics.js";
+import { detectShotCycles, mergeCycles, computeMetrics, standingBodyHeight, METRIC_NAMES, METRIC_VIEWS, LOWER_IS_BETTER } from "./metrics.js";
 import { buildReport, renderReport, TYPE_LABEL, setProfile } from "./report.js";
 import { classifyView, VIEW_LABEL, coverageGaps, windowVisibility, courtGuideSVG } from "./views.js";
 import { normalizeSequence, dtwAlign, jointDeviations, JOINT_LABEL, JOINT_ADVICE } from "./compare.js";
 import { isHevcFile, makePersonPicker } from "./media.js";
+import {
+  listRecords, addRecord, removeRecord, clearRecords,
+  exportText, importText, metricSeries, compareMetric, summarize, makeRecord,
+} from "./history.js";
+import { lineChart } from "./charts.js";
 
 console.log("🏀 投篮姿态分析 · 代码版本 v5.4（2026-10-30）——评分异常时请先确认此版本并强制刷新（Ctrl+F5）");
 
@@ -190,7 +195,9 @@ $("btn-play").addEventListener("click", () => {
 });
 
 // ---------- 4. 姿态报告 ----------
-function runReport() {
+// archive=true 时把本次结果存进训练档案（重新分析同一段视频也算一次真实数据）；
+// 切换投篮类型只是重新评分，不该在档案里堆重复记录
+function runReport(archive = true) {
   const type = $("shot-type").value;
   // 检测结果按视频缓存：切换投篮类型时不重新检测——否则 pickShootingSide 的选臂
   // 回写会成为下次检测的首选侧，同一视频换一次类型评分就可能不同
@@ -226,7 +233,13 @@ function runReport() {
   mainVis = windowVisibility(frames, Object.values(SIDE[chosenSide]), cycle.crouchIdx, cycle.apexIdx);
   // 多次出手逐次计算后取中位数：比单次出手更接近真实水平，也消除「两次分析选中不同出手」的评分漂移
   const metrics = mergeCycles(cycles.map((c) => computeMetrics(frames, c, chosenSide, type, mainView)));
-  renderReport(body, buildReport(metrics, type, cycles.length), { jump: true, note: rejectNote }); // 建议卡可点击回看视频瞬间
+  const report = buildReport(metrics, type, cycles.length);
+  // 存档 + 「较上次」对比（对比基准是存档前的历史，所以先取历史再写入当前记录）
+  const cmp = saveToArchive(report, metrics, "主视频", mainView, archive);
+  renderReport(body, report, {
+    jump: true, note: rejectNote, // 建议卡可点击回看视频瞬间
+    compare: cmp.compare, compareSummary: cmp.summary,
+  });
   renderGapCard(body);
   body.scrollIntoView({ behavior: "smooth", block: "start" });
   updateFusionUI();
@@ -270,8 +283,8 @@ function renderGapCard(body) {
 
 // 分析完成后切换投篮类型 → 按新标准直接重新生成报告（无需重新识别）
 $("shot-type").addEventListener("change", () => {
-  if (frames.length && !$("btn-play").disabled) runReport();
-  if (fusionRendered) generateFusion(); // 融合报告按新标准同步重算
+  if (frames.length && !$("btn-play").disabled) runReport(false);
+  if (fusionRendered) generateFusion(false); // 融合报告按新标准同步重算
 });
 
 // 点击建议卡 → 视频跳到出问题的瞬间，让用户亲眼看到原因
@@ -443,6 +456,226 @@ function startDualPlayback(mapAtoB, refCycle, refSide) {
   };
 }
 
+﻿// ---------- 6. 训练档案（纵向追踪） ----------
+// 档案只存在本机 localStorage：隐私模式下访问 localStorage 会抛错，捕获后按「无档案」降级，
+// 主流程不能因为存不进去而报错（视频与档案都不出本机）。
+function historyStorage() {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// 指标对比基准：优先「同一投篮类型 + 同一来源」的历史，没有才退回全部历史
+function comparableRecords(records, report, source) {
+  const same = records.filter((r) => r.type === report.type && r.source === source);
+  return same.length ? same : records;
+}
+
+// 报告头部的总览句：分数只在「同一投篮类型 + 同一来源」之间比较，类型不同只报历史次数
+function buildCompareSummary(records, report, source) {
+  const same = records.filter((r) => r.type === report.type && r.source === source);
+  if (!same.length) {
+    return records.length ? `历史共 ${records.length} 次分析（投篮类型/来源不同，不比较分数）` : "";
+  }
+  const parts = [];
+  const delta = report.score - same[0].score;
+  parts.push(delta === 0 ? "与上次同分" : `较上次 ${delta > 0 ? "+" : ""}${delta} 分`);
+  const scored = same.filter((r) => isFinite(r.score));
+  const avg = (arr) => (arr.length ? arr.reduce((s, r) => s + r.score, 0) / arr.length : null);
+  const recent = avg(scored.slice(0, 3));
+  const earlier = avg(scored.slice(3, 6));
+  if (recent != null && earlier != null) parts.push(`近 3 次均分 ${recent.toFixed(0)}（此前 ${earlier.toFixed(0)}）`);
+  else if (recent != null) parts.push(`近 3 次均分 ${recent.toFixed(0)}`);
+  return parts.join(" · ");
+}
+
+// 存一次分析并返回「较上次」的对比数据（对比用的是写入前的历史，所以先算再存）
+// archive=false 时只算对比不写记录——切换投篮类型只是重新评分，不该在档案里堆重复记录
+function saveToArchive(report, metrics, source, view, archive = true) {
+  const store = historyStorage();
+  const prev = store ? listRecords(store) : [];
+  const base = comparableRecords(prev, report, source);
+  const compare = {};
+  for (const m of report.metrics) {
+    const cmp = compareMetric(base, m.id, m.num, { lowerIsBetter: LOWER_IS_BETTER.has(m.id) });
+    if (cmp.count) compare[m.id] = cmp; // 没有历史就不显示「较上次」
+  }
+  const summary = buildCompareSummary(prev, report, source);
+  if (store && archive) {
+    try {
+      addRecord(store, makeRecord({ report, metrics, source, view }));
+    } catch {
+      /* 写入失败（配额满/隐私模式）静默降级，不影响主流程 */
+    }
+  }
+  renderHistory();
+  return { compare, summary };
+}
+
+// 档案区当前选中的指标（重绘后要保留）
+let historyMetric = "";
+
+// 档案区渲染：总览条 → 评分历史曲线 → 单指标趋势 → 记录列表
+function renderHistory() {
+  const store = historyStorage();
+  const body = $("history-body");
+  if (!store) {
+    body.innerHTML = '<p class="report-empty">当前浏览器无法保存档案（隐私模式或存储已满），可用导出/导入在其他设备查看。</p>';
+    return;
+  }
+  const records = listRecords(store);
+  if (!records.length) {
+    body.innerHTML = '<p class="report-empty">还没有记录。完成一次分析后会自动存入档案。</p>';
+    return;
+  }
+  const sum = summarize(records);
+  const scored = records.filter((r) => isFinite(r.score));
+  const avg = (arr) => (arr.length ? arr.reduce((s, r) => s + r.score, 0) / arr.length : null);
+  const recent = avg(scored.slice(0, 3));
+  const earlier = avg(scored.slice(3, 6));
+  const trendText =
+    sum.trend == null ? "样本不足" : sum.trend > 0 ? `↗ 上升 ${sum.trend.toFixed(1)}` : sum.trend < 0 ? `↘ 下降 ${Math.abs(sum.trend).toFixed(1)}` : "→ 持平";
+
+  // 评分历史：x 轴用时间戳（图表不画 x 轴刻度，日期在下方记录列表里逐条列出）
+  const scorePts = [...records].reverse().map((r) => ({ x: r.ts, y: r.score })).filter((p) => isFinite(p.y));
+  const scoreChart = lineChart({
+    series: [{ label: "得分", color: "#38bdf8", points: scorePts }],
+    bands: [{ from: 60, to: 80, color: "rgba(74,222,128,0.16)" }], // 60–80 分参考带
+    xLabel: "日期",
+    yUnit: "分",
+    height: 160,
+  });
+
+  // 单指标趋势：列出档案里出现过的全部指标
+  const ids = [...new Set(records.flatMap((r) => Object.keys(r.metrics ?? {})))];
+  // 上次选的指标要留住——整块重绘后下拉框会被重建
+  if (historyMetric && !ids.includes(historyMetric)) historyMetric = "";
+  const metricId = historyMetric || (ids.length ? ids[0] : "");
+  const metric = metricId ? records.find((r) => r.metrics?.[metricId])?.metrics[metricId] : null;
+  const series = metricId ? metricSeries(records, metricId) : [];
+  const band =
+    metric && isFinite(metric.lo) && isFinite(metric.hi) && metric.hi > metric.lo
+      ? [{ from: metric.lo, to: metric.hi, color: "rgba(56,189,248,0.16)" }]
+      : [];
+  const trendChart = series.length
+    ? lineChart({
+        series: [{ label: METRIC_NAMES[metricId] ?? metricId, color: "#f97316", points: series.map((p) => ({ x: p.ts, y: p.num })) }],
+        bands: band,
+        xLabel: "日期",
+        yUnit: metric?.unit ?? "",
+        height: 160,
+      })
+    : "";
+  const lastNum = series.length ? series[series.length - 1].num : null;
+
+  // 记录列表：每行日期/类型/来源/分数/评级，可展开看该次各项读数，可删除
+  const list = records
+    .map((r) => {
+      const rows = Object.entries(r.metrics ?? {})
+        .map(([id, m]) => `<div class="hist-metric"><span>${METRIC_NAMES[id] ?? m.name ?? id}</span><b>${m.value ?? m.num}</b></div>`)
+        .join("");
+      return `
+        <li class="hist-item">
+          <div class="hist-row">
+            <span class="hist-date">${r.date ?? ""}</span>
+            <span class="hist-type">${TYPE_LABEL[r.type] ?? r.type ?? "—"}</span>
+            <span class="hist-src">${r.source ?? ""}</span>
+            <span class="hist-score">${isFinite(r.score) ? `${r.score} ${r.grade ?? ""}` : "—"}</span>
+            <button class="hist-del" data-id="${r.id}" title="删除这条记录">✕</button>
+          </div>
+          <details><summary>展开 ${Object.keys(r.metrics ?? {}).length} 项指标</summary><div class="hist-metrics">${rows}</div></details>
+        </li>`;
+    })
+    .join("");
+
+  body.innerHTML = `
+    <div class="hist-overview">
+      <div class="hist-stat"><b>${sum.count}</b><span>累计分析</span></div>
+      <div class="hist-stat"><b>${sum.avgScore != null ? sum.avgScore.toFixed(0) : "—"}</b><span>平均分</span></div>
+      <div class="hist-stat"><b>${sum.lastScore != null ? sum.lastScore : "—"}</b><span>最近分数</span></div>
+      <div class="hist-stat"><b>${recent != null ? recent.toFixed(0) : "—"}</b><span>近 3 次均分</span></div>
+      <div class="hist-stat"><b class="trend-${sum.trend > 0 ? "up" : sum.trend < 0 ? "down" : "flat"}">${trendText}</b><span>此前 ${earlier != null ? earlier.toFixed(0) : "—"}</span></div>
+    </div>
+    <h3 class="hist-title">评分历史</h3>
+    ${scoreChart || '<p class="report-empty">暂无评分数据。</p>'}
+    <h3 class="hist-title">单指标趋势</h3>
+    <select id="history-metric" class="hist-select">${ids.map((id) => `<option value="${id}">${METRIC_NAMES[id] ?? id}</option>`).join("")}</select>
+    ${trendChart || '<p class="report-empty">该指标暂无历史读数。</p>'}
+    ${lastNum != null ? `<p class="hint">最近一次：${METRIC_NAMES[metricId] ?? metricId} ${typeof lastNum === "number" ? lastNum.toFixed(2) : lastNum}${metric?.unit ?? ""}</p>` : ""}
+    <h3 class="hist-title">历史记录</h3>
+    <ul class="hist-list">${list}</ul>
+  `;
+  // 整块重绘后原来的下拉失效，重新绑定（用 change 事件避免输入即重绘）
+  const sel = $("history-metric");
+  if (sel) {
+    sel.value = metricId;
+    sel.addEventListener("change", (e) => {
+      historyMetric = e.target.value;
+      renderHistory();
+    });
+  }
+}
+
+// 删除单条记录（列表里的 ✕）
+$("history-body").addEventListener("click", (e) => {
+  const btn = e.target.closest(".hist-del");
+  if (!btn) return;
+  const store = historyStorage();
+  if (!store) return;
+  removeRecord(store, btn.dataset.id);
+  $("history-status").textContent = "已删除该条记录。";
+  renderHistory();
+});
+
+// 导出：Blob + 本地下载，不联网
+$("btn-history-export").addEventListener("click", () => {
+  const store = historyStorage();
+  if (!store) {
+    $("history-status").textContent = "当前浏览器无法读取档案，导出不可用。";
+    return;
+  }
+  const d = new Date();
+  const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+  const blob = new Blob([exportText(store)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `shot-analyzer-档案-${stamp}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  $("history-status").textContent = "已导出档案文件（保存在本机，可发给自己换设备）。";
+});
+
+// 导入：读本地文件文本 → importText → 刷新档案区；失败给出原因
+$("btn-history-import").addEventListener("click", () => $("history-file").click());
+$("history-file").addEventListener("change", async (e) => {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  const store = historyStorage();
+  if (!store) {
+    $("history-status").textContent = "当前浏览器无法保存档案，导入不可用。";
+    return;
+  }
+  const text = await file.text();
+  const res = importText(store, text);
+  $("history-status").textContent = res.ok ? `已导入 ${res.count} 条记录。` : `导入失败：${res.error}`;
+  e.target.value = ""; // 允许重复选同一个文件
+  renderHistory();
+});
+
+// 清空：二次确认后清档案
+$("btn-history-clear").addEventListener("click", () => {
+  if (!confirm("确定清空全部训练档案？此操作不可恢复（可先导出备份）。")) return;
+  const store = historyStorage();
+  if (store) clearRecords(store);
+  $("history-status").textContent = "档案已清空。";
+  renderHistory();
+});
+
 // ---------- 工具函数 ----------
 // 通用视频扫描：逐帧 seek + 推理，返回 [{t, landmarks, aspect}]（主/参考/融合视频共用）。
 // 链式排队串行执行：多段视频同时分析时不会互相抢占共享的推理画布
@@ -557,11 +790,11 @@ let fusionRendered = false;
     // 可见度随所选侧链重算——融合排序按 vis 挑来源，不能沿用旧值
     slot.vis = windowVisibility(slot.frames, Object.values(SIDE[slot.side]), slot.cycle?.crouchIdx, slot.cycle?.apexIdx);
     $(`fusion-status-${n}`).textContent = `✅ 已手动指定为${VIEW_LABEL[slot.view]}机位`;
-    if (fusionRendered) generateFusion();
+    if (fusionRendered) generateFusion(true);
   });
 });
 
-$("btn-fusion").addEventListener("click", generateFusion);
+$("btn-fusion").addEventListener("click", () => generateFusion(true));
 
 async function analyzeFusionSlot(i, file) {
   const n = i + 1;
@@ -623,7 +856,7 @@ async function analyzeFusionSlot(i, file) {
   $(`fusion-view-${n}`).classList.remove("hidden");
   $(`fusion-view-${n}`).value = view;
   st.innerHTML = `✅ ${VIEW_LABEL[view]}机位 · 检测到 ${cycles.length} 次出手${cycles.rejected ? ` · ⚠️ ${cycles.rejected} 次未计入（人物不在画面）` : ""}${fr.failedFrames ? ` · ⚠️ ${fr.failedFrames} 帧识别失败` : ""}${note}`;
-  if (fusionRendered) generateFusion(); // 已有融合报告时自动按新视频重算
+  if (fusionRendered) generateFusion(true); // 已有融合报告时自动按新视频重算
   updateFusionUI();
 }
 
@@ -638,7 +871,7 @@ function updateFusionUI() {
       : "主视频已分析。按报告下方的补拍建议拍一段其他机位，上传即可融合。";
 }
 
-function generateFusion() {
+function generateFusion(archive = false) {
   const type = $("shot-type").value;
   const analyses = [];
   if (frames.length && lastCycle) {
@@ -677,7 +910,9 @@ function generateFusion() {
 
   const report = buildReport(merged, type); // type 为 auto 时在此解析为罚球/跳投
   report.title = `${TYPE_LABEL[report.type]}多角度融合评分${report.autoType ? "（自动识别）" : ""}`;
-  renderReport($("fusion-report"), report);
+  // 融合报告同样入档案，来源标成「多角度融合」，方便和单机位报告区分
+  const cmp = saveToArchive(report, merged, "多角度融合", mainView, archive);
+  renderReport($("fusion-report"), report, { compare: cmp.compare, compareSummary: cmp.summary });
   fusionRendered = true;
 
   // 仍未覆盖的指标与所需机位
@@ -703,3 +938,6 @@ function generateFusion() {
 
 // 第 1 步拍摄建议里的机位示意图（无高亮，展示全部三个机位）
 $("guide-slot").innerHTML = courtGuideSVG();
+
+// 训练档案区：进入页面先把已有档案渲染出来（空档案显示引导文案）
+renderHistory();
