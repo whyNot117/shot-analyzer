@@ -11,6 +11,25 @@ import { classifyScene, moveDistance, MOVE_WINDOW, MOVE_BASE_WINDOW, SCENE_LABEL
 
 export const JUMP_MIN = 0.05; // 起跳判定阈值：髋部相对站姿抬升超过身高 5% 视为起跳
 
+// ---------- 出手高度的判定区间（随「这一次出手有没有离地」变化） ----------
+//
+// 两套区间各有各的依据，不能混用：
+// · 起跳（跳投/移动投篮）：文献实测出手手高为身高的 112.8%–118.9%，取 105%–130% 覆盖个体差异；
+//   下缘 95% 是提醒带，用来抓「出手被压低」。
+// · 不起跳（定点罚球/原地举球）：出手点停在肩部到头部高度。人体肩高约 82%–85% 体高，
+//   手腕只比肩高 5%–15%，踝→腕的垂直距离因此只有 75%–95% 体高；上缘放到 100% 留给手腕
+//   过头一点的个体，下缘 68% 是提醒带，抓「手臂几乎没抬起来」。
+//
+// 为什么必须分开：1.05–1.30 是按跳投校准的。拿它去判定点罚球，会把完全正常的肩高出手
+// （实测约 0.80×体高）判成「明显偏低」，并给出「出手被压低后弧线受压」这种错误建议。
+export const RELEASE_HEIGHT_BAND_JUMP = { lo: 1.05, hi: 1.3, warnLo: 0.95, jumped: true };
+export const RELEASE_HEIGHT_BAND_GROUND = { lo: 0.75, hi: 1.0, warnLo: 0.68, jumped: false };
+
+/** 按本次出手是否离地取出对应的出手高度判定区间 */
+export function releaseHeightBand(jumped) {
+  return jumped ? RELEASE_HEIGHT_BAND_JUMP : RELEASE_HEIGHT_BAND_GROUND;
+}
+
 function median(arr) {
   const a = arr.filter((x) => x != null && isFinite(x)).sort((x, y) => x - y);
   if (!a.length) return NaN;
@@ -299,6 +318,21 @@ export function mergeCycles(cyclesMetrics) {
       value: formatMetricValue(id, num, first.unit),
     });
   }
+  // 出手高度的判定区间随「有没有离地」变化，合并后必须跟着合并后的起跳值走。
+  // 报告里同时展示「起跳幅度」和「出手高度」，两者口径不一致就会自相矛盾——
+  // 例如合并后显示「基本贴地」，却拿跳投区间（1.05–1.30）去判出手高度。
+  // 放在 mergeCycles 里重算，是因为「合并后的读数」只有这一层知道；报告层只负责按区间
+  // 判 good/warn/bad，不必再关心区间是怎么来的，规则因此只存在于 metrics.js 一处。
+  const jumpNum = out.find((m) => m.id === "jump")?.num;
+  const rh = out.find((m) => m.id === "releaseHeight");
+  if (rh && jumpNum != null && isFinite(jumpNum)) {
+    const band = releaseHeightBand(jumpNum > JUMP_MIN);
+    rh.lo = band.lo;
+    rh.hi = band.hi;
+    rh.warnLo = band.warnLo;
+    rh.jumped = band.jumped;
+    rh.rangeText = `${band.lo}–${band.hi}${rh.unit}`;
+  }
   return out; // 已按 METRIC_VIEWS 固定顺序
 }
 
@@ -405,6 +439,178 @@ export function bodyHeightScale(frames, sideName) {
   return hs[Math.max(0, Math.ceil(hs.length * 0.9) - 1)];
 }
 
+// ---------- 关键点合理性过滤（v5.7） ----------
+
+// 允许的最大逐帧关节位移，单位：体高/帧。
+// 物理依据：人手上举最快约 8–10 m/s，对 1.8 m 的人约合 0.15–0.19 个体高/帧（30 fps），
+// 关节相对身体其它部位的最大速度也就在这个量级。取 0.6 个体高/帧（≈18 个体高/s ≈ 32 m/s）
+// 留了 3 倍余量——既能抓住定位漂移，又不会误伤任何真实发力。
+export const JOINT_JUMP_MAX = 0.6;
+
+// 漂移「连坐」阈值：确认某帧有漂移后，检查同帧的其它关节是否也偏离了轨迹。
+// 依据：人关节逐帧的二阶差分（轨迹曲率）最大也就 0.02 个体高量级（肘部线加速度约 35 m/s²，
+// 30 fps 下每帧位置只改变约 0.01 个体高），0.25 个体高已是 10 倍以上的余量。
+// 这个阈值只在「已经确认有漂移的帧」上使用，干净数据完全不受影响。
+export const JOINT_DRIFT_ECHO_MAX = 0.25;
+
+/**
+ * 关键点合理性过滤：修掉 MediaPipe 的单帧定位漂移。
+ *
+ * 球挡住手、短暂遮挡或跟踪跳变时，MediaPipe 会把某个关节甩到别处。实测真人素材里出现过
+ * 腕部在 1/30 秒内跳了 0.369（归一化坐标）——该帧体高只有 0.28–0.43，即 1 帧移动了
+ * 约 1.3 个体高（≈40 m/s）。人关节物理上不可能，这是纯定位误差。
+ *
+ * 判据：逐帧的「该关节相对上一帧的位移」超过 0.6 个体高即视为失真。
+ * 尺度取该帧的肩−踝垂直距离在 ±5 帧邻域内的中位数——邻域中位数对单帧漂移免疫，
+ * 同时人离镜头的远近变化缓慢，邻域中位数就代表「这一帧的人有多大」。
+ *
+ * 定位到「跳变发生在哪两帧之间」之后，还要判断到底是哪一帧偏了：真实轨迹是连续的，
+ * 偏离的那一帧会明显偏离前后两帧的中点，另一个则只偏离一半。
+ *
+ * 修补方式：连续失真段用前后正常帧线性插值。宁可给出一条略平的轨迹，也不留一个离谱的点。
+ *
+ * 返回新的 frames（不改原数组），无失真时原样返回——干净数据的读数必须分毫不动。
+ */
+export function repairJointOutliers(frames, sideName) {
+  const s = SIDE[sideName];
+  const n = frames.length;
+  if (n < 3) return frames;
+  const aspect = frames[0]?.aspect ?? 1;
+
+  // 逐帧体高尺度（肩−踝垂直距离），单帧缺失或漂移用邻域中位数补
+  const rawScale = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const sh = frames[i]?.landmarks?.[s.shoulder];
+    const an = frames[i]?.landmarks?.[s.ankle];
+    const h = sh && an ? Math.abs(sh.y - an.y) : NaN;
+    rawScale[i] = isFinite(h) && h > 1e-4 ? h : NaN;
+  }
+  const scaleAt = (i) => {
+    const w = [];
+    for (let k = Math.max(0, i - 5); k <= Math.min(n - 1, i + 5); k++) {
+      if (isFinite(rawScale[k])) w.push(rawScale[k]);
+    }
+    return w.length ? median(w) : NaN;
+  };
+  // 全片尺度兜底（90 分位）：尺度本身也可能连续多帧不可用
+  const all = rawScale.filter((v) => isFinite(v)).sort((a, b) => a - b);
+  const fallback = all.length ? all[Math.max(0, Math.ceil(all.length * 0.9) - 1)] : 0;
+  if (!fallback) return frames;
+
+  // 覆盖所有被测关节：腕、肘、肩、髋、膝、踝
+  const joints = [s.wrist, s.elbow, s.shoulder, s.hip, s.knee, s.ankle];
+  const fixes = new Map(); // 帧号 → { 关键点索引: {x,y} }（x 已做宽高比校正）
+  const series = new Map(); // 关键点索引 → 逐帧坐标
+
+  for (const idx of joints) {
+    const p = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const l = frames[i]?.landmarks?.[idx];
+      p[i] = l ? { x: l.x * aspect, y: l.y } : null;
+    }
+    series.set(idx, p);
+  }
+
+  // 第一遍：逐关节找「一帧内移动超过 0.6 个体高」的硬跳变
+  const badByJoint = new Map();
+  const hotFrames = new Set();
+  for (const idx of joints) {
+    const p = series.get(idx);
+    const bad = new Set();
+    for (let i = 1; i < n; i++) {
+      const a = p[i - 1], b = p[i];
+      if (!a || !b) continue;
+      const scale = scaleAt(i);
+      const limit = JOINT_JUMP_MAX * (isFinite(scale) && scale > 0 ? scale : fallback);
+      if (Math.hypot(b.x - a.x, b.y - a.y) <= limit) continue;
+      // 跳变发生在第 i-1 帧与第 i 帧之间：用二阶差分判断是哪一帧偏离了轨迹
+      const prev2 = p[i - 2], next = p[i + 1];
+      const devPrev = prev2
+        ? Math.hypot(a.x - (prev2.x + b.x) / 2, a.y - (prev2.y + b.y) / 2)
+        : NaN;
+      const devCur = next
+        ? Math.hypot(b.x - (a.x + next.x) / 2, b.y - (a.y + next.y) / 2)
+        : NaN;
+      let outlier;
+      if (!isFinite(devPrev)) outlier = i;
+      else if (!isFinite(devCur)) outlier = i - 1;
+      else outlier = devCur > devPrev ? i : i - 1;
+      bad.add(outlier);
+      hotFrames.add(outlier);
+    }
+    badByJoint.set(idx, bad);
+  }
+
+  // 第二遍：漂移会沿着关节链「连坐」——腕部被甩走时，肘部（肩→腕连线上的中间点）
+  // 也会偏离自己的轨迹，只修腕部会留下一个被污染的肘角，出手伸肘速度这类计分指标会被带偏。
+  // 因此在已经确认有漂移的帧上，再检查其它关节偏离局部轨迹的幅度。
+  for (const idx of joints) {
+    const p = series.get(idx);
+    const bad = badByJoint.get(idx);
+    for (const i of hotFrames) {
+      if (bad.has(i)) continue;
+      const prev = p[i - 1], cur = p[i], next = p[i + 1];
+      if (!prev || !cur || !next) continue;
+      const scale = scaleAt(i);
+      const limit = JOINT_DRIFT_ECHO_MAX * (isFinite(scale) && scale > 0 ? scale : fallback);
+      const dev = Math.hypot(
+        cur.x - (prev.x + next.x) / 2,
+        cur.y - (prev.y + next.y) / 2
+      );
+      if (dev > limit) bad.add(i);
+    }
+  }
+
+  for (const idx of joints) {
+    const bad = badByJoint.get(idx);
+    if (!bad.size) continue;
+    const p = series.get(idx);
+
+    // 连续失真段用前后正常帧线性插值
+    const sorted = [...bad].sort((x, y) => x - y);
+    const runs = [];
+    let start = null, last = null;
+    for (const i of sorted) {
+      if (start == null) { start = last = i; continue; }
+      if (i === last + 1) { last = i; continue; }
+      runs.push([start, last]);
+      start = last = i;
+    }
+    if (start != null) runs.push([start, last]);
+    for (const [a, b] of runs) {
+      let pa = a - 1;
+      while (pa >= 0 && bad.has(pa)) pa--;
+      let nb = b + 1;
+      while (nb < n && bad.has(nb)) nb++;
+      for (let i = a; i <= b; i++) {
+        let pt;
+        if (pa >= 0 && nb < n) {
+          const t = (i - pa) / (nb - pa);
+          pt = {
+            x: p[pa].x + (p[nb].x - p[pa].x) * t,
+            y: p[pa].y + (p[nb].y - p[pa].y) * t,
+          };
+        } else if (pa >= 0) pt = { ...p[pa] };
+        else if (nb < n) pt = { ...p[nb] };
+        else continue;
+        if (!fixes.has(i)) fixes.set(i, {});
+        fixes.get(i)[idx] = pt;
+      }
+    }
+  }
+
+  if (!fixes.size) return frames;
+  return frames.map((f, i) => {
+    const m = fixes.get(i);
+    if (!m || !f.landmarks) return f;
+    const lm = f.landmarks.slice();
+    for (const [idx, pt] of Object.entries(m)) {
+      lm[Number(idx)] = { ...f.landmarks[Number(idx)], x: pt.x / aspect, y: pt.y };
+    }
+    return { ...f, landmarks: lm };
+  });
+}
+
 /**
  * 计算单次出手的投篮姿态指标。type: "jump" | "free" | "three"；view: "side" | "front" | "oblique" | "unknown"。
  * 矢状面指标（膝角/出手角等）只在侧面类机位下计算；正面指标（肘内外展/站距/左右重心）只在正面类机位下计算；
@@ -415,6 +621,9 @@ export function bodyHeightScale(frames, sideName) {
  * 返回指标数组，每项含 { id, name, num, unit, lo, hi, weight, rangeText, value }。
  */
 export function computeMetrics(frames, cycle, sideName, type = "jump", view = "side", fps = 30) {
+  // 先修掉关键点的单帧定位漂移。放在这里而不是调用方，是因为单机位报告与多角度融合
+  // 都走 computeMetrics——一处生效，两条路径都覆盖。
+  frames = repairJointOutliers(frames, sideName);
   const s = SIDE[sideName];
   const { releaseIdx, crouchIdx, standIdx, apexIdx } = cycle;
   const scene = cycle.scene ?? "spot"; // 场景（spot/moving/catch）：由 js/scene.js 判定，周期对象上带着
@@ -448,6 +657,9 @@ export function computeMetrics(frames, cycle, sideName, type = "jump", view = "s
 
   // 起跳幅度：出手时髋部相对站姿的抬升（纯垂直量，各机位有效，邻域中位数）
   const jumpRise = median(winIdx(releaseIdx).map((i) => (hip[standIdx].y - hip[i].y) / bodyH));
+  // 是否离地：与 jump 指标同一口径（髋部相对站姿抬升超过身高 5%）。
+  // 出手高度的判定区间跟着它走——定点罚球不起跳，用跳投区间判会把正常出手判成偏低。
+  const jumped = jumpRise > JUMP_MIN;
 
   // 举球点（set point）：下蹲到出手之间肘角最小的帧（正面机位下投影角也能定位举球时刻）
   let setIdx = crouchIdx;
@@ -559,7 +771,7 @@ export function computeMetrics(frames, cycle, sideName, type = "jump", view = "s
   });
 
   // 出手垂直速度（×身高/s，趋势参考）：出手时腕部向上的速度。
-  // 取值方式与 elbowSpeed 一致——±2 帧跨度求斜率（单帧差分噪声太大），出手窗内取正向峰值。
+  // 取值方式与 elbowSpeed 一致——±2 帧跨度求斜率（单帧差分噪声太大），出手窗内取正向中位值。
   // 没有可靠的专项文献阈值（快到失控同样是问题），只作趋势参考，不计分、不出建议。
   const releaseVel = (() => {
     const vals = [];
@@ -569,7 +781,9 @@ export function computeMetrics(frames, cycle, sideName, type = "jump", view = "s
       vals.push(((a.y - b.y) * fps) / 4); // y 向下为正：y 变小 = 腕部在往上走
     }
     const pos = vals.filter((v) => v > 0);
-    return pos.length ? Math.max(...pos) / bodyScale : NaN;
+    // 窗口内取中位数而不是最大值：单帧定位漂移会凭空造出一个 30 m/s 的假峰值，
+    // 取最大值等于把整段读数押在最不可信的那一帧上；中位数对单帧尖峰免疫。
+    return pos.length ? median(pos) / bodyScale : NaN;
   })();
   add("releaseVel", "出手垂直速度", releaseVel, "×身高/s", 0, 99, 1, {
     verdictOverride: "info", screeningOnly: true,
@@ -599,8 +813,11 @@ export function computeMetrics(frames, cycle, sideName, type = "jump", view = "s
     });
   }
 
-  // 文献校准：移动投篮实测出手手高为身高的 112.8%–118.9%（跳投类）；下限 0.95 过松会放过贴肩出手
-  add("releaseHeight", "出手高度", releaseHeight, "×身高", 1.05, 1.3, 1, { frame: releaseIdx, warnLo: 0.95 });
+  // 出手高度：区间按本次是否离地自适应（依据见 RELEASE_HEIGHT_BAND_JUMP / _GROUND 的注释）
+  const rhBand = releaseHeightBand(jumped);
+  add("releaseHeight", "出手高度", releaseHeight, "×身高", rhBand.lo, rhBand.hi, 1, {
+    frame: releaseIdx, warnLo: rhBand.warnLo, jumped: rhBand.jumped,
+  });
 
   // ---------- 场景专属指标（只在对应场景产出，定点站投的报告里不会出现） ----------
   // 这四个指标都没有可引用的专项文献阈值，一律做成趋势参考型（不计分），
@@ -630,7 +847,7 @@ export function computeMetrics(frames, cycle, sideName, type = "jump", view = "s
       frame: releaseIdx,
     });
 
-    // 起跳上升速度（×身高/s，趋势参考）：腾空段髋部上升速度的峰值。
+    // 起跳上升速度（×身高/s，趋势参考）：腾空段髋部上升速度。
     // 同样用 ±2 帧跨度求斜率，避免单帧差分噪声；只在检得起跳（起跳类）时才产出。
     const takeoffRiseSpeed = (() => {
       const vals = [];
@@ -640,11 +857,12 @@ export function computeMetrics(frames, cycle, sideName, type = "jump", view = "s
         vals.push(((a.y - b.y) * fps) / 4); // y 向下为正：y 变小 = 髋部在上升
       }
       const pos = vals.filter((v) => v > 0);
-      return pos.length ? Math.max(...pos) / bodyScale : NaN;
+      // 同 releaseVel：取中位数而不是最大值，避免单帧漂移把上升速度读成假峰值
+      return pos.length ? median(pos) / bodyScale : NaN;
     })();
     add("takeoffRiseSpeed", "起跳上升速度", takeoffRiseSpeed, "×身高/s", 0, 99, 1, {
       verdictOverride: "info", screeningOnly: true,
-      rangeText: "腾空段髋部上升速度峰值（趋势参考）",
+      rangeText: "腾空段髋部上升速度（趋势参考）",
       frame: takeoffIdx,
     });
   }
@@ -766,7 +984,6 @@ export function computeMetrics(frames, cycle, sideName, type = "jump", view = "s
   }
 
   // 起跳：verdict 由 buildReport 按投篮类型判定——多次出手取中位数后才能正确判定
-  const jumped = jumpRise > JUMP_MIN;
   M.push({
     id: "jump", name: type === "free" ? "罚球贴地" : "起跳幅度",
     num: jumpRise, unit: "×身高", lo: 0, hi: 1, weight: 1,

@@ -13,7 +13,7 @@ import {
 import { lineChart } from "./charts.js";
 import { SCENE_LABEL } from "./scene.js";
 
-console.log("🏀 投篮姿态分析 · 代码版本 v5.5（2026-11-05）——评分异常时请先确认此版本并强制刷新（Ctrl+F5）");
+console.log("🏀 投篮姿态分析 · 代码版本 v5.7（2026-11-05）——评分异常时请先确认此版本并强制刷新（Ctrl+F5）");
 
 const $ = (id) => document.getElementById(id);
 const esc = escHtml;

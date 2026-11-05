@@ -110,29 +110,32 @@ function tipId(m, type) {
   return m.id;
 }
 
-// 出手高度的区间（与 js/metrics.js 的 releaseHeight 一致：1.05–1.30×身高）
-const RH_LO = 105, RH_HI = 130;
-
 /**
  * 出手高度的建议文案：两个方向分开写 + 按投篮类型自适应。
  * 读数低于下缘与高于上缘是两种不同的问题，写成同一句会出现「高于区间却说偏低」的自相矛盾；
  * 自动识别成罚球时也不能说「跳投出手手高」。
+ *
+ * 区间数字一律取本次实际判定的 m.lo/m.hi（js/metrics.js 按起跳与否自适应），
+ * 不在这里写死 105%–130%——否则定点罚球会被按跳投口径解释。
  */
 function releaseHeightTip(m, type) {
-  const isFree = type === "free";
-  const band = isFree
-    ? `实测射手带（罚球出手点约为身高的 ${RH_LO}%–${RH_HI}%）`
-    : `实测射手带（跳投出手手高约为身高的 ${RH_LO}%–${RH_HI}%）`;
+  const lo = Math.round((m.lo ?? 0) * 100);
+  const hi = Math.round((m.hi ?? 0) * 100);
+  // 区间名跟着报告口径走：罚球口径说「罚球出手点」，跳投口径才说「跳投出手手高」。
+  // 点罚球起跳与否另说，但报告口径是罚球时不能拿跳投手高去解释读数。
+  const bandName = type === "free" ? "罚球出手点" : m.jumped ? "跳投出手手高" : "定点出手点";
+  const band = `实测射手带（${bandName}约为身高的 ${lo}%–${hi}%）`;
+  const ctx = type === "free" ? "罚球" : "跳投";
   const low = m.num < m.lo;
   if (m.verdict === "good") return `出手点 ${m.value}，落在${band}内。`;
   if (m.verdict === "warn") {
     return low
       ? `出手点 ${m.value}，略低于${band}的下缘——出手被压得偏低，出手角度略压。`
-      : `出手点 ${m.value}，略高于${band}的上缘——出手点偏高，也可能是机位/透视把读数放大了，建议换侧面机位复核。`;
+      : `出手点 ${m.value}，略高于${band}的上缘——按${ctx}口径出手点偏高，也可能是机位/透视把读数放大了，建议换侧面机位复核。`;
   }
   return low
     ? `出手点 ${m.value}，明显低于${band}——出手被压低后弧线受压，封盖风险和落点偏差同时上升。`
-    : `出手点 ${m.value}，明显高于${band}——出手点偏高，球在头前离手，出手角度更难压住；也可能只是机位/透视把读数放大了，建议换侧面机位复核。`;
+    : `出手点 ${m.value}，明显高于${band}——按${ctx}口径出手点偏高，球在头前离手，出手角度更难压住；也可能只是机位/透视把读数放大了，建议换侧面机位复核。`;
 }
 
 // 「较上次」差值的显示格式：数值越大越不需要小数位（角度类 100° 以上不带 .0）
