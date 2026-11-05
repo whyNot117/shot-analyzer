@@ -1,67 +1,11 @@
 // 投篮周期检测与生物力学指标计算（纯函数，输入为逐帧关键点序列）
 // 坐标系：归一化 0–1，y 向下为正（数值越小 = 位置越高）
 // 多次出手：detectAllCycles 逐次录取、mergeCycles 逐指标取中位数，报告因此更稳也更准
-import { SIDE, angleAt } from "./draw.js";
+import { SIDE } from "./draw.js";
+import { smooth, fillGaps, pointsOf, angleSeries } from "./angles.js";
+import { classifyScene, moveDistance, MOVE_WINDOW, MOVE_BASE_WINDOW, SCENE_LABEL } from "./scene.js";
 
 // ---------- 时序工具 ----------
-
-function smoothNums(s, win = 3) {
-  const half = win >> 1;
-  const out = [];
-  for (let i = 0; i < s.length; i++) {
-    let sum = 0, n = 0;
-    for (let k = i - half; k <= i + half; k++) if (k >= 0 && k < s.length) { sum += s[k]; n++; }
-    out.push(sum / (n || 1));
-  }
-  return out;
-}
-
-// 点序列（{x,y}）与数值序列通用：分别平滑
-function smooth(series, win = 3) {
-  if (series.length && typeof series[0] === "number") return smoothNums(series, win);
-  // 某关键点全程缺失时以 0 占位，避免崩溃（对应指标会被 isFinite 过滤掉）
-  const xs = smoothNums(series.map((p) => p?.x ?? 0), win);
-  const ys = smoothNums(series.map((p) => p?.y ?? 0), win);
-  return series.map((_, i) => ({ x: xs[i], y: ys[i] }));
-}
-
-const clone = (v) => (typeof v === "number" ? v : { ...v });
-function mix(a, b, r) {
-  if (typeof a === "number") return a * (1 - r) + b * r;
-  return { x: a.x * (1 - r) + b.x * r, y: a.y * (1 - r) + b.y * r };
-}
-
-// 用前后邻值线性插值填补空帧（未识别到人的帧）
-function fillGaps(series) {
-  const out = [...series];
-  let last = null;
-  for (let i = 0; i < out.length; i++) {
-    if (out[i] != null) { last = i; continue; }
-    let next = null;
-    for (let j = i + 1; j < out.length; j++) if (out[j] != null) { next = j; break; }
-    if (last == null && next == null) continue;
-    if (last == null) { out[i] = clone(out[next]); continue; }
-    if (next == null) { out[i] = clone(out[last]); continue; }
-    out[i] = mix(out[last], out[next], (i - last) / (next - last));
-  }
-  return out;
-}
-
-function pointsOf(frames, idx) {
-  const aspect = frames[0]?.aspect ?? 1; // 归一化坐标 x 乘宽高比才是真实几何（scanInto 逐帧记录）
-  return frames.map((f) => {
-    const l = f.landmarks?.[idx];
-    return l ? { x: l.x * aspect, y: l.y } : null;
-  });
-}
-
-// 逐帧计算某关节角（a-b-c，b 为顶点），返回角度数组（度）
-function angleSeries(frames, a, b, c) {
-  const A = smooth(fillGaps(pointsOf(frames, a)));
-  const B = smooth(fillGaps(pointsOf(frames, b)));
-  const C = smooth(fillGaps(pointsOf(frames, c)));
-  return fillGaps(B.map((_, i) => angleAt(A[i], B[i], C[i])));
-}
 
 // ---------- 投篮周期检测 ----------
 
@@ -143,9 +87,11 @@ export function formatMetricValue(id, num, unit) {
  * 每周期再过有效门：有真实下蹲（≥8°）、腕顶点明显高于肩、窗口关键点可见、
  * 举球点高度与最强出手一致——挥手/走位举臂等假周期进不了中位数。
  * 站姿帧取「上一球顶点 0.3 秒后 ~ 本次下蹲前」最直的一帧，不伸进上一球的滞空段。
+ * 移动出手（moving）时站姿基线不存在，改取「下蹲前 1.5 秒窗口内膝角最大的那一帧」；
+ * 场景判定见 js/scene.js（阈值集中在那里），sceneHint 可手动指定场景（null/"auto" 为自动）。
  * 返回按时间排序的周期数组（可能为空），confidence 为全片有效帧占比。
  */
-export function detectAllCycles(frames, sideName, fps = 30) {
+export function detectAllCycles(frames, sideName, fps = 30, sceneHint = null) {
   const s = SIDE[sideName];
   const hasLm = (i) => !!frames[i]?.landmarks; // 该帧是否真有骨架（空档帧为 false）
   const valid = frames.filter((f) => f.landmarks).length;
@@ -213,11 +159,33 @@ export function detectAllCycles(frames, sideName, fps = 30) {
       rejectNote = rejectNote || "起跳前的下蹲过程大部分不在画面里";
       continue;
     }
+    // 场景判定：移动出手没有「站定」的基线帧，基线怎么取取决于场景。
+    // 先用未确定基线的周期做一次判定（判定只看出手前的位移与屈膝，不需要站姿帧）
+    const forced = sceneHint && sceneHint !== "auto" ? sceneHint : null;
+    const scene0 = forced ?? classifyScene(frames, { releaseIdx, crouchIdx }, sideName, fps).scene;
+    // 接球即投没有下蹲：膝角全程几乎不变，「膝角最小帧」退化成窗口起点，
+    // 站姿基线窗口随之塌缩成两三帧，这次出手会被误判成「基线缺失」而整球丢掉。
+    // 改用「腕部最低点」（接球后往下压的那一下）作为 crouchIdx：
+    // 站姿基线窗口重新有内容，下蹲深度门对 catch 场景本来就放行。
+    if (scene0 === "catch") {
+      let dipIdx = -1;
+      for (let i = from; i < releaseIdx; i++) {
+        if (!hasLm(i)) continue;
+        if (dipIdx < 0 || wrist[i].y > wrist[dipIdx].y) dipIdx = i;
+      }
+      if (dipIdx >= 0) crouchIdx = dipIdx;
+    }
+
     // 站姿参考帧：上一球顶点 0.3 秒后（首球从片头）~ 本次下蹲前，站得最直（膝角最大）的帧。
     // 窗口不伸进上一球的滞空/跟随段——否则归一化基线被上一球抬高，多球读数漂移。
+    // 移动场景改用「下蹲前 1.5 秒窗口内膝角最大的那一帧」——更贴近蹬伸前的最高支撑点，
+    // 站定前提不成立时，原来的「上一球之后」窗口会把上一球的滞空段当成基线。
     // 离场期间别人的骨架（体型与窗口主流不符）不能当基线——体高分母一旦被替身污染，
     // 举球点一致性门会把这球静默丢掉；先按窗口体高中位数筛掉异己骨架，再选最直帧
-    const sFrom = prevApex < 0 ? 0 : Math.min(crouchIdx, prevApex + Math.round(fps * 0.3));
+    const sFrom =
+      scene0 === "moving"
+        ? Math.max(0, crouchIdx - Math.round(fps * MOVE_BASE_WINDOW))
+        : prevApex < 0 ? 0 : Math.min(crouchIdx, prevApex + Math.round(fps * 0.3));
     const hAt = (i) => Math.abs(shoulder[i].y - ankle[i].y);
     const hs = [];
     for (let i = sFrom; i <= crouchIdx; i++) if (hasLm(i)) hs.push(hAt(i));
@@ -263,7 +231,15 @@ export function detectAllCycles(frames, sideName, fps = 30) {
         visN++;
       }
     }
-    built.push({ releaseIdx, crouchIdx, standIdx, apexIdx, v, setH, crouchDepth, apexRise, vis: visSum / (visN || 1) });
+    // 场景最终判定（基线已定，bodyH 更准）
+    const sceneInfo = forced
+      ? { scene: forced, confidence: 1, reason: `已手动指定为「${SCENE_LABEL[forced] ?? forced}」` }
+      : classifyScene(frames, { releaseIdx, crouchIdx, standIdx }, sideName, fps);
+    built.push({
+      releaseIdx, crouchIdx, standIdx, apexIdx, v, setH, crouchDepth, apexRise,
+      vis: visSum / (visN || 1),
+      scene: sceneInfo.scene, sceneConfidence: sceneInfo.confidence, sceneReason: sceneInfo.reason,
+    });
     prevApex = apexIdx;
   }
   // 有效性门：假周期（挥手、走位举臂、遮挡毛刺）没有下蹲、顶点不够高或举球点明显不同，
@@ -272,13 +248,15 @@ export function detectAllCycles(frames, sideName, fps = 30) {
   const kept = built
     .filter(
       (c) =>
-        c.crouchDepth >= 8 &&
+        // 接球即投本来就没有下蹲蓄力，屈腿深度门对它不适用
+        (c.scene === "catch" || c.crouchDepth >= 8) &&
         c.apexRise >= 0.15 &&
         c.vis >= 0.4 &&
         !(best && Math.abs(c.setH - best.setH) > 0.15)
     )
-    .map(({ releaseIdx, crouchIdx, standIdx, apexIdx }) => ({
+    .map(({ releaseIdx, crouchIdx, standIdx, apexIdx, scene, sceneConfidence, sceneReason }) => ({
       releaseIdx, crouchIdx, standIdx, apexIdx, confidence: valid / n,
+      scene, sceneConfidence, sceneReason,
     }));
   // 未计入的出手（人物不在画面/基线缺失）随数组一起带出，由界面披露——不静默吞球
   kept.rejected = rejected;
@@ -292,12 +270,12 @@ export function detectAllCycles(frames, sideName, fps = 30) {
  * 正面机位下 pickSide 可能选中非出手臂（双臂可见度接近），其手腕全程不过肩会导致漏检。
  * 返回 { cycles, side }——cycles 按时间排序（可能为空数组），side 为实际检出所用的侧。
  */
-export function detectShotCycles(frames, preferredSide, fps = 30) {
-  let cycles = detectAllCycles(frames, preferredSide, fps);
-  if (cycles.length) return { cycles, side: preferredSide };
+export function detectShotCycles(frames, preferredSide, fps = 30, sceneHint = null) {
+  let cycles = detectAllCycles(frames, preferredSide, fps, sceneHint);
+  if (cycles.length) return { cycles, side: preferredSide, sceneHint };
   const other = preferredSide === "right" ? "left" : "right";
-  cycles = detectAllCycles(frames, other, fps);
-  return { cycles, side: cycles.length ? other : preferredSide };
+  cycles = detectAllCycles(frames, other, fps, sceneHint);
+  return { cycles, side: cycles.length ? other : preferredSide, sceneHint };
 }
 
 /**
@@ -333,6 +311,8 @@ export const METRIC_NAMES = {
   trunkLean: "躯干倾斜", headDrift: "头部晃动", balance: "重心横移", jump: "起跳幅度",
   elbowAbduction: "肘内外展", stanceWidth: "双脚站距", lateralBalance: "左右重心偏移",
   elbowSpeed: "出手伸肘速度", legArmDelay: "腿臂分离时差", legSeq: "下肢发力顺序差",
+  moveDist: "出手前移动距离", moveSpeed: "出手前移动速度",
+  takeoffTiming: "起跳-出手时序", dipAmount: "沉球量",
 };
 
 // 每项指标在哪些机位下测得可靠（融合报告按此挑来源；oblique 视为两向近似可用）
@@ -344,14 +324,31 @@ export const METRIC_VIEWS = {
   elbowAbduction: ["front"], stanceWidth: ["front"], lateralBalance: ["front"],
   // 伸肘速度是纯角度量，正面机位同样可测；发力链时序依赖矢状面内的关节顺序，只在侧面类可信
   elbowSpeed: ["side", "front"], legArmDelay: ["side"], legSeq: ["side"],
+  // 场景专属指标：移动距离/速度只有移动出手才有意义，沉球量只有接球即投才有意义
+  moveDist: ["side"], moveSpeed: ["side"], takeoffTiming: ["side", "front"], dipAmount: ["side"],
 };
 
 // 趋势参考型指标：运动学上可测但缺少专项文献阈值，不计分，靠训练档案的历史趋势看变化
-export const TREND_ONLY = new Set(["legArmDelay", "legSeq", "lateralBalance"]);
+export const TREND_ONLY = new Set([
+  "legArmDelay", "legSeq", "lateralBalance",
+  // 场景专属指标没有文献锚点，一律按趋势参考型处理（同时登记进 TREND_ONLY，
+  // 否则 buildReport 会把它们当成计分项，缺文献依据的区间会把分数带偏）
+  "moveDist", "moveSpeed", "takeoffTiming", "dipAmount",
+]);
 
 // 越小越好的指标：训练档案的「较上次」对比按数值增减方向判断好坏会判反，
 // 这类指标（头部晃动、重心横移、腿臂分离时差）差值方向与好坏方向相反
 export const LOWER_IS_BETTER = new Set(["headDrift", "balance", "legArmDelay"]);
+
+// 髋部开始持续上升（离地）的帧：从该帧起连续三帧髋部都在上升才算起跳起点，
+// 单帧抖动（EPS 以下）不算起跳——否则站着不动也会测出一个「起跳时刻」
+function findTakeoff(hip, crouchIdx, releaseIdx) {
+  const EPS = 5e-4;
+  for (let i = Math.max(0, crouchIdx); i + 2 <= releaseIdx; i++) {
+    if (hip[i + 1].y < hip[i].y - EPS && hip[i + 2].y < hip[i + 1].y - EPS) return i;
+  }
+  return null;
+}
 
 /**
  * 计算单次出手的投篮姿态指标。type: "jump" | "free" | "three"；view: "side" | "front" | "oblique" | "unknown"。
@@ -364,6 +361,7 @@ export const LOWER_IS_BETTER = new Set(["headDrift", "balance", "legArmDelay"]);
 export function computeMetrics(frames, cycle, sideName, type = "jump", view = "side", fps = 30) {
   const s = SIDE[sideName];
   const { releaseIdx, crouchIdx, standIdx, apexIdx } = cycle;
+  const scene = cycle.scene ?? "spot"; // 场景（spot/moving/catch）：由 js/scene.js 判定，周期对象上带着
   const aspect = frames[0]?.aspect ?? 1; // 单帧取点时的宽高比校正（序列取点由 pointsOf 处理）
   const sagittal = view !== "front"; // side / oblique / unknown 都按侧面类近似
   const frontal = view === "front" || view === "oblique";
@@ -441,13 +439,32 @@ export function computeMetrics(frames, cycle, sideName, type = "jump", view = "s
     }
     const headDrift = (noseMaxX - noseMinX) / bodyH;
 
-    // 重心横移：出手瞬间髋部相对站姿的水平位移（邻域中位数）
-    const hipDrift = median(winIdx(releaseIdx).map((i) => Math.abs(hip[i].x - hip[standIdx].x))) / bodyH;
+    // 重心横移：出手瞬间髋部相对基准位置的水平位移（邻域中位数）
+    // 移动场景的基准改用「出手前 0.5s 的平均髋位」：移动中的横移本来就是正常动作，
+    // 拿站姿帧当基准会把正常的移动误判成「重心不稳」
+    const hipBaseX =
+      scene === "moving"
+        ? (() => {
+            const half = Math.round(fps * 0.5);
+            const xs = [];
+            for (let i = Math.max(0, releaseIdx - half); i <= releaseIdx; i++) {
+              if (isFinite(hip[i].x)) xs.push(hip[i].x);
+            }
+            return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : hip[standIdx].x;
+          })()
+        : hip[standIdx].x;
+    const hipDrift = median(winIdx(releaseIdx).map((i) => Math.abs(hip[i].x - hipBaseX))) / bodyH;
 
     // 极值型指标：定位帧 + 抛物线顶点细化（邻域中位数会系统性推离极值）
     // good 带按文献校准（2026-10-29，桌面投篮资料库）：熟练罚球命中球准备期膝屈 99.5°±8.4
     // （Cabarkapa 系列），教学共识 90–100°，三分熟练组下蹲更深；上限放到 120 容纳浅蹲型个体
-    add("kneeCrouch", "下蹲膝角", refineExtremum(knee, crouchIdx), "°", 90, 120, 2, { frame: crouchIdx });
+    // 接球即投本来就没有蓄力下蹲，膝角读数天然落在区间外——按计分项判 bad 是误报，
+    // 这种场景下把它降级成趋势参考项（只作记录，不计分、不出建议）
+    add("kneeCrouch", "下蹲膝角", refineExtremum(knee, crouchIdx), "°", 90, 120, 2,
+      scene === "catch"
+        ? { frame: crouchIdx, verdictOverride: "info", screeningOnly: true,
+            rangeText: "接球即投无蓄力下蹲（趋势参考）" }
+        : { frame: crouchIdx });
     add("elbowSet", "举球肘角", refineExtremum(elbow, setIdx), "°", 75, 105, 2, { frame: setIdx });
     // 出手肘伸展在陡坡上：±1 中位数够稳，±2 会被曲率拉低
     add("elbowRelease", "出手肘伸展", windowMedian(elbow, releaseIdx, 1), "°", 150, 185, 1.5, { frame: releaseIdx });
@@ -504,6 +521,48 @@ export function computeMetrics(frames, cycle, sideName, type = "jump", view = "s
 
   // 文献校准：移动投篮实测出手手高为身高的 112.8%–118.9%（跳投类）；下限 0.95 过松会放过贴肩出手
   add("releaseHeight", "出手高度", releaseHeight, "×身高", 1.05, 1.3, 1, { frame: releaseIdx, warnLo: 0.95 });
+
+  // ---------- 场景专属指标（只在对应场景产出，定点站投的报告里不会出现） ----------
+  // 这四个指标都没有可引用的专项文献阈值，一律做成趋势参考型（不计分），
+  // 靠训练档案里的历史趋势看变化。
+  if (sagittal && scene === "moving") {
+    // 出手前移动距离：出手前 1.0s 双足中点的水平位移（×身高）
+    const dist = moveDistance(frames, cycle, sideName, fps);
+    add("moveDist", "出手前移动距离", dist, "×身高", 0, 1, 1, {
+      verdictOverride: "info", screeningOnly: true,
+      rangeText: "出手前 1s 双足中点水平位移（趋势参考）",
+      frame: releaseIdx,
+    });
+    // 出手前移动速度：同一段位移除以窗口长度（×身高/s）
+    add("moveSpeed", "出手前移动速度", isFinite(dist) ? dist / MOVE_WINDOW : NaN, "×身高/s", 0, 3, 1, {
+      verdictOverride: "info", screeningOnly: true,
+      rangeText: "移动距离 ÷ 1.0s（趋势参考）",
+      frame: releaseIdx,
+    });
+  }
+
+  // 起跳-出手时序：髋部开始持续上升（离地）到出手帧的间隔（spot/moving 的跳投类都有）
+  const takeoffIdx = findTakeoff(hip, crouchIdx, releaseIdx);
+  if (takeoffIdx != null) {
+    add("takeoffTiming", "起跳-出手时序", ((releaseIdx - takeoffIdx) * 1000) / fps, "ms", 0, 9999, 1, {
+      verdictOverride: "info", screeningOnly: true,
+      rangeText: "正值 = 起跳早于出手（趋势参考）",
+      frame: releaseIdx,
+    });
+  }
+
+  if (sagittal && scene === "catch") {
+    // 沉球量：举球点之前腕部最低点（接球后下压的位置）与举球点的肘角差
+    let dipIdx = setIdx;
+    for (let i = Math.max(0, crouchIdx); i <= setIdx; i++) {
+      if (wrist[i].y > wrist[dipIdx].y) dipIdx = i; // y 越大越靠下
+    }
+    add("dipAmount", "沉球量", Math.abs(elbow[dipIdx] - elbow[setIdx]), "°", 0, 90, 1, {
+      verdictOverride: "info", screeningOnly: true,
+      rangeText: "接球后下压的幅度（趋势参考）",
+      frame: setIdx,
+    });
+  }
 
   if (frontal) {
     // 单帧取点（含宽高比校正），关键点缺失则跳过对应帧

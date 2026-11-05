@@ -99,7 +99,7 @@ check("双球视频检出 2 次出手", twoDetect.cycles.length === 2, `n=${twoD
 const mergedTwo = mergeCycles(twoDetect.cycles.map((c) => computeMetrics(twoShotFrames, c, sideDetect.side, "jump", "side")));
 const singleReport = buildReport(computeMetrics(sideFrames, sideCycle, sideDetect.side, "jump", "side"), "jump");
 const mergedReport = buildReport(mergedTwo, "jump", 2);
-check("双球合并后 13 项侧面指标无缺失", mergedTwo.length === 13, `n=${mergedTwo.length}`);
+check("双球合并后 14 项侧面指标无缺失", mergedTwo.length === 14, `n=${mergedTwo.length}`);
 check("两次相同出手的合并评分与单次一致", mergedReport.score === singleReport.score,
   `${mergedReport.score} vs ${singleReport.score}`);
 check("合并报告标注出手次数", mergedReport.cycleCount === 2);
@@ -128,9 +128,15 @@ check("左右重心为趋势参考（info，不计分）",
 
 console.log("— METRIC_VIEWS 与实际产出一致 —");
 const allIds = new Set([...sideIds, ...frontIds]);
-check("16 项指标 id 全部对得上", Object.keys(METRIC_VIEWS).length === 16 &&
-  Object.keys(METRIC_VIEWS).every((id) => allIds.has(id)),
-  [...Object.keys(METRIC_VIEWS).filter((id) => !allIds.has(id))].join(","));
+// 场景专属指标（移动/接球才有）：定点站投的视频里不该出现，也就不该「对得上」
+const SCENE_ONLY = ["moveDist", "moveSpeed", "dipAmount"];
+const coreIds = Object.keys(METRIC_VIEWS).filter((id) => !SCENE_ONLY.includes(id));
+check("指标注册共 20 项（16 核心 + 4 场景专属）", Object.keys(METRIC_VIEWS).length === 20,
+  `n=${Object.keys(METRIC_VIEWS).length}`);
+check("核心指标 id 全部对得上（场景专属项除外）", coreIds.every((id) => allIds.has(id)),
+  [...coreIds.filter((id) => !allIds.has(id))].join(","));
+check("场景专属指标在定点站投视频里不产出", !SCENE_ONLY.some((id) => allIds.has(id)),
+  SCENE_ONLY.filter((id) => allIds.has(id)).join(","));
 
 console.log("— 多次出手中位数合并 —");
 const fake = (id, num, extra = {}) => ({ id, name: id, num, unit: "°", lo: 0, hi: 180, weight: 1, rangeText: "", value: "", ...extra });
@@ -354,7 +360,9 @@ for (const id of Object.keys(METRIC_VIEWS)) {
   const src = cands[0];
   merged.push({ ...src.metrics.find((m) => m.id === id), src: src.label });
 }
-check("融合后 16 项无缺失", merged.length === 16 && missing.length === 0, `missing=${missing.join(",")}`);
+check("融合后核心指标无缺失（缺的只有场景专属项）",
+  merged.length === coreIds.length && missing.every((id) => SCENE_ONLY.includes(id)),
+  `merged=${merged.length} missing=${missing.join(",")}`);
 check("融合项带来源标签", merged.every((m) => m.src));
 
 console.log("— 报告引擎 —");

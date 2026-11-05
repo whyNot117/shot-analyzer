@@ -169,7 +169,7 @@ export function renderReport(el, report, opts = {}) {
     if (!c || c.delta == null || !isFinite(c.delta) || c.delta === 0) return "";
     const better = c.better === true;
     return `<small class="m-trend ${better ? "good" : "bad"}">${c.delta > 0 ? "↑" : "↓"} 比上次 ${formatDelta(c.delta)}${
-      TREND_ONLY.has(m.id) ? "（趋势）" : ""
+      TREND_ONLY.has(m.id) || m.verdict === "info" ? "（趋势）" : ""
     }</small>`;
   };
 
@@ -220,6 +220,19 @@ export function renderReport(el, report, opts = {}) {
     userProfile?.age && `年龄 ${userProfile.age}岁`,
   ].filter(Boolean);
 
+  // 场景判定：结论与把握都摊开给用户看；把握偏低时明说「场景判定不确定」
+  const scene = opts.scene;
+  const sceneLine = scene
+    ? `<p class="scene-line">场景：${scene.label}（${scene.reason}）· 判定把握 ${scene.confidence.toFixed(1)}${
+        scene.confidence >= 0.4 && scene.confidence <= 0.6 ? " · 场景判定不确定" : ""
+      }${scene.manual ? " · 手动指定" : ""}</p>`
+    : "";
+
+  // 移动/接球场景是实验性功能：区间没有真实素材校准，底部必须醒目提示
+  const experimentalWarn = opts.experimental
+    ? '<p class="experimental-warn">⚠️ 移动/接球场景判定为实验性功能，指标区间尚未用真实素材校准，结论仅供参考。</p>'
+    : "";
+
   el.innerHTML = `
     <div class="report-summary">
       <div class="score-ring" style="--p:${report.score}">
@@ -229,6 +242,7 @@ export function renderReport(el, report, opts = {}) {
         <h3>${report.title ?? (report.autoType ? `自动识别：按${TYPE_LABEL[report.type]}标准` : `${TYPE_LABEL[report.type]}姿态评分`)}</h3>
         <p>${count("good")} 项达标 · ${count("warn")} 项待改进 · ${count("bad")} 项需重点纠正${count("info") ? ` · ${count("info")} 项趋势参考` : ""}${report.cycleCount > 1 ? ` · 共 ${report.cycleCount} 次出手（指标取中位数）` : ""}</p>
         ${opts.compareSummary ? `<p class="compare-line">${opts.compareSummary}</p>` : ""}
+        ${sceneLine}
         ${pfBits.length ? `<p class="profile-line">${pfBits.join(" · ")}</p>` : ""}
       </div>
     </div>
@@ -239,6 +253,7 @@ export function renderReport(el, report, opts = {}) {
       ${tips || "<p>全部指标达标，保持当前动作！</p>"}
     </div>
     ${opts.note ? `<p class="report-warn">${opts.note}</p>` : ""}
+    ${experimentalWarn}
     <p class="report-note">指标基于 2D 骨架估算，存在测量误差；投篮常有 20–45° 转体站位，会放大正面视角的肘外展/左右偏移读数。下蹲膝角、出手方向角、出手高度、躯干倾斜四项区间已按投篮科研实测数据校准，其余为文献常识启发值；各项均为动作形态筛查而非命中率预测；单机位视角盲区见「补拍建议」，多角度融合可补全。主报告、融合报告与不同机位/投篮类型的计分口径不同（计分指标与权重不同），分数不能跨报告、跨版本直接比较。请作为训练参考而非绝对标准。</p>
   `;
 }

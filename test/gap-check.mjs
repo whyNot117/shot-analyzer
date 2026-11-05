@@ -1,7 +1,13 @@
 // 长段 null 帧（主人公离场）穿过整条分析链路的实测（node test/gap-check.mjs）
+// 每个场景都带断言：全部符合预期时输出「🎉 全部通过」，否则退出码非 0
 import { detectShotCycles, computeMetrics } from "../js/metrics.js";
 
 const ASPECT = 1080 / 1920, FPS = 30;
+let fails = 0;
+const check = (name, cond, detail = "") => {
+  if (cond) console.log(`  ✅ ${name}`);
+  else { fails++; console.log(`  ❌ ${name}${detail ? " —— " + detail : ""}`); }
+};
 function buildFrames(keyIdx, poses, mirror) {
   const frames = [];
   const last = keyIdx[keyIdx.length - 1];
@@ -40,6 +46,7 @@ const shot = buildFrames([0, 36, 42, 50, 65, 95], SIDE_POSES, mirror);
 {
   const d = detectShotCycles(shot, "right", FPS);
   console.log(`A 基线（无空档）：检出 ${d.cycles.length} 次，releaseIdx=${d.cycles.map(c=>c.releaseIdx)}`);
+  check("A 基线：检出 1 次出手", d.cycles.length === 1, `n=${d.cycles.length}`);
 }
 // 场景 B：中间插 150 帧 null（主人公离场 5 秒），前后各一次出手
 {
@@ -49,6 +56,9 @@ const shot = buildFrames([0, 36, 42, 50, 65, 95], SIDE_POSES, mirror);
   const frames = [...shot, ...gap, ...after];
   const d = detectShotCycles(frames, "right", FPS);
   console.log(`B 150 帧空档：检出 ${d.cycles.length} 次，releaseIdx=${d.cycles.map(c=>c.releaseIdx)}（期望 2 次）`);
+  check("B 150 帧空档：前后两球都检出", d.cycles.length === 2, `n=${d.cycles.length}`);
+  check("B 两次出手帧号正确（48 / 294）", JSON.stringify(d.cycles.map((c) => c.releaseIdx)) === "[48,294]",
+    JSON.stringify(d.cycles.map((c) => c.releaseIdx)));
   if (d.cycles.length) {
     for (const c of d.cycles) {
       const m = computeMetrics(frames, c, "right", "jump", "side");
@@ -65,6 +75,9 @@ const shot = buildFrames([0, 36, 42, 50, 65, 95], SIDE_POSES, mirror);
   const frames = [...shot, ...gap, ...after];
   const d = detectShotCycles(frames, "right", FPS);
   console.log(`C 空档紧贴第二球（40 帧）：检出 ${d.cycles.length} 次，releaseIdx=${d.cycles.map(c=>c.releaseIdx)}（期望 2 次）`);
+  check("C 空档紧贴第二球：两球都检出", d.cycles.length === 2, `n=${d.cycles.length}`);
+  check("C 两次出手帧号正确（48 / 184）", JSON.stringify(d.cycles.map((c) => c.releaseIdx)) === "[48,184]",
+    JSON.stringify(d.cycles.map((c) => c.releaseIdx)));
   for (const c of d.cycles) {
     const m = computeMetrics(frames, c, "right", "jump", "side");
     const crouch = m.find((x) => x.id === "kneeCrouch");
@@ -90,6 +103,7 @@ const shot = buildFrames([0, 36, 42, 50, 65, 95], SIDE_POSES, mirror);
   const post = Array.from({ length: 30 }, (_, i) => ({ t: (150 + i) / FPS, landmarks: mk(0.1), aspect: ASPECT }));
   const d = detectShotCycles([...pre, ...gap, ...post], "right", FPS);
   console.log(`D 空档插值斜坡：检出 ${d.cycles.length} 次（期望 0——空档里的运动是插值假象，不是出手）`);
+  check("D 空档插值斜坡：不产生假出手", d.cycles.length === 0, `n=${d.cycles.length}`);
 }
 // 场景 E：屈腿过程大部分落在空档里（人物当时不在画面）→ 该球无法测量，应计入「未计入」
 {
@@ -98,4 +112,10 @@ const shot = buildFrames([0, 36, 42, 50, 65, 95], SIDE_POSES, mirror);
   const frames = [...shot.slice(0, 5), ...gap, ...shot.slice(46).map((f, i) => ({ ...f, t: (46 + i) / FPS }))];
   const d = detectShotCycles(frames, "right", FPS);
   console.log(`E 屈腿段被遮挡：检出 ${d.cycles.length} 次，未计入 ${d.cycles.rejected ?? 0} 次（${d.cycles.rejectNote || "-"}）`);
+  check("E 屈腿段被遮挡：测不出就不产出周期", d.cycles.length === 0, `n=${d.cycles.length}`);
+  check("E 屈腿段被遮挡：计入「未计入」并说明原因", (d.cycles.rejected ?? 0) === 1 && !!d.cycles.rejectNote,
+    `rejected=${d.cycles.rejected ?? 0} note=${d.cycles.rejectNote || "-"}`);
 }
+
+console.log(fails === 0 ? "\n🎉 全部通过" : `\n💥 ${fails} 项未达预期`);
+process.exit(fails === 0 ? 0 : 1);

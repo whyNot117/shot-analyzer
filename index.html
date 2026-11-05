@@ -55,6 +55,13 @@
           <option value="three">三分</option>
           <option value="free">罚球</option>
         </select>
+        <label for="shot-scene">场景：</label>
+        <select id="shot-scene" title="场景自动识别不准时可手动指定">
+          <option value="auto" selected>自动识别</option>
+          <option value="spot">定点站投</option>
+          <option value="moving">移动后出手</option>
+          <option value="catch">接球即投</option>
+        </select>
       </div>
       <div class="video-wrap" id="video-wrap">
         <video id="video" playsinline muted preload="metadata"></video>

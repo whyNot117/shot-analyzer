@@ -11,6 +11,7 @@ import {
   exportText, importText, metricSeries, compareMetric, summarize, makeRecord,
 } from "./history.js";
 import { lineChart } from "./charts.js";
+import { SCENE_LABEL } from "./scene.js";
 
 console.log("🏀 投篮姿态分析 · 代码版本 v5.4（2026-10-30）——评分异常时请先确认此版本并强制刷新（Ctrl+F5）");
 
@@ -199,9 +200,14 @@ $("btn-play").addEventListener("click", () => {
 // 切换投篮类型只是重新评分，不该在档案里堆重复记录
 function runReport(archive = true) {
   const type = $("shot-type").value;
+  const sceneHint = $("shot-scene").value; // auto = 自动识别，也可手动指定场景
   // 检测结果按视频缓存：切换投篮类型时不重新检测——否则 pickShootingSide 的选臂
-  // 回写会成为下次检测的首选侧，同一视频换一次类型评分就可能不同
-  const detect = lastDetection ?? detectShotCycles(frames, chosenSide, SAMPLE_FPS);
+  // 回写会成为下次检测的首选侧，同一视频换一次类型评分就可能不同。
+  // 场景例外：移动/接球的基线选取与场景判定有关，改场景必须重新检测。
+  const detect =
+    lastDetection && lastDetection.sceneHint === sceneHint
+      ? lastDetection
+      : detectShotCycles(frames, chosenSide, SAMPLE_FPS, sceneHint);
   lastDetection = detect;
   const cycles = detect.cycles;
   lastCycle = cycles[0] ?? null;
@@ -238,11 +244,23 @@ function runReport(archive = true) {
   const cmp = saveToArchive(report, metrics, "主视频", mainView, archive);
   // 关键动作曲线：用第一个（代表性）出手画肘角/膝角走势
   const curves = cycle ? cycleCurves(frames, cycle, chosenSide, SAMPLE_FPS) : null;
+  // 场景判定结果（scene/sceneConfidence/sceneReason 由检测周期带着）
+  const sceneId = cycle.scene ?? "spot";
+  const sceneInfo = {
+    scene: sceneId,
+    label: SCENE_LABEL[sceneId] ?? sceneId,
+    confidence: cycle.sceneConfidence ?? 0,
+    reason: cycle.sceneReason ?? "",
+    manual: sceneHint !== "auto",
+  };
   renderReport(body, report, {
     jump: true, note: rejectNote, // 建议卡可点击回看视频瞬间
     compare: cmp.compare, compareSummary: cmp.summary,
     curves,
     curveNote: mainView === "front" ? "正面机位读数为投影角，参考意义有限。" : "",
+    scene: sceneInfo,
+    // 移动/接球场景是实验性功能，结论要打上醒目提示
+    experimental: sceneId === "moving" || sceneId === "catch",
   });
   renderGapCard(body);
   body.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -284,6 +302,11 @@ function renderGapCard(body) {
   card.innerHTML = html;
   body.appendChild(card);
 }
+
+// 手动指定场景 → 重新判定基线并重新出报告（不写入档案，避免同一段视频堆重复记录）
+$("shot-scene").addEventListener("change", () => {
+  if (frames.length && !$("btn-play").disabled) runReport(false);
+});
 
 // 分析完成后切换投篮类型 → 按新标准直接重新生成报告（无需重新识别）
 $("shot-type").addEventListener("change", () => {
