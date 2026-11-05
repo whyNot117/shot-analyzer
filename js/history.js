@@ -112,24 +112,28 @@ export function importText(storage, text) {
 export function metricSeries(records, metricId) {
   return records
     .filter((r) => r.metrics && isFinite(r.metrics[metricId]?.num))
-    .map((r) => ({ ts: r.ts, num: r.metrics[metricId].num, id: r.id }))
+    .map((r) => ({ ts: Number(r.ts), num: Number(r.metrics[metricId].num), id: r.id }))
     .sort((a, b) => a.ts - b.ts);
 }
 
 /**
  * 与上一次（以及历史最好一次）的对比。
  * lowerIsBetter: 越小越好（如头部晃动）时，delta 的正负含义相反——这里统一返回「变好/变差」方向。
+ * neutral: 方向不明的指标（如腿臂分离时差，正值代表下肢领先上肢而非「越大越好」），
+ *   只报差值，better 返回 null，界面不标变好/变差。
  */
-export function compareMetric(records, metricId, num, { lowerIsBetter = false } = {}) {
+export function compareMetric(records, metricId, num, { lowerIsBetter = false, neutral = false } = {}) {
   const series = metricSeries(records, metricId);
   const prev = series.length ? series[series.length - 1] : null;
   let best = null;
-  for (const p of series) {
-    if (!best) { best = p; continue; }
-    if (lowerIsBetter ? p.num < best.num : p.num > best.num) best = p;
+  if (!neutral) {
+    for (const p of series) {
+      if (!best) { best = p; continue; }
+      if (lowerIsBetter ? p.num < best.num : p.num > best.num) best = p;
+    }
   }
   const delta = prev && isFinite(num) ? num - prev.num : null;
-  const better = delta == null ? null : lowerIsBetter ? delta < 0 : delta > 0;
+  const better = delta == null || neutral ? null : lowerIsBetter ? delta < 0 : delta > 0;
   return {
     count: series.length,
     prev: prev?.num ?? null,
@@ -143,16 +147,17 @@ export function compareMetric(records, metricId, num, { lowerIsBetter = false } 
 
 /** 档案总览：次数、平均分、最近分数、最近三次相对更早三次的走向 */
 export function summarize(records) {
-  const scored = records.filter((r) => isFinite(r.score));
-  const avg = (arr) => (arr.length ? arr.reduce((s, r) => s + r.score, 0) / arr.length : null);
+  // 档案可以从外部导入，分数一律按数字取（导入文件里写成字符串也能正确参与计算）
+  const scored = records.filter((r) => isFinite(Number(r.score)));
+  const avg = (arr) => (arr.length ? arr.reduce((s, r) => s + Number(r.score), 0) / arr.length : null);
   const recent3 = scored.slice(0, 3);
   const prev3 = scored.slice(3, 6);
   const a = avg(recent3), b = avg(prev3);
   return {
     count: records.length,
     avgScore: avg(scored),
-    lastScore: scored.length ? scored[0].score : null,
-    firstScore: scored.length ? scored[scored.length - 1].score : null,
+    lastScore: scored.length ? Number(scored[0].score) : null,
+    firstScore: scored.length ? Number(scored[scored.length - 1].score) : null,
     trend: a != null && b != null ? a - b : null, // 最近三次均分 − 更早三次均分
     dates: records.map((r) => r.date).filter(Boolean),
   };

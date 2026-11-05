@@ -1,8 +1,8 @@
 // 应用主流程：选视频 → 逐帧扫描姿态 → 播放时叠加骨架
 import { getLandmarker, resetLandmarker, nextTimestamp, beginScan } from "./pose.js";
 import { drawFrame, pickSide, pickShootingSide, SIDE } from "./draw.js";
-import { detectShotCycles, mergeCycles, computeMetrics, cycleCurves, standingBodyHeight, METRIC_NAMES, METRIC_VIEWS, LOWER_IS_BETTER } from "./metrics.js";
-import { buildReport, renderReport, TYPE_LABEL, setProfile } from "./report.js";
+import { detectShotCycles, mergeCycles, computeMetrics, cycleCurves, standingBodyHeight, METRIC_NAMES, METRIC_VIEWS, LOWER_IS_BETTER, NEUTRAL_DIRECTION } from "./metrics.js";
+import { buildReport, renderReport, TYPE_LABEL, setProfile, escHtml } from "./report.js";
 import { classifyView, VIEW_LABEL, coverageGaps, windowVisibility, courtGuideSVG } from "./views.js";
 import { normalizeSequence, dtwAlign, jointDeviations, JOINT_LABEL, JOINT_ADVICE } from "./compare.js";
 import { isHevcFile, makePersonPicker } from "./media.js";
@@ -13,9 +13,10 @@ import {
 import { lineChart } from "./charts.js";
 import { SCENE_LABEL } from "./scene.js";
 
-console.log("🏀 投篮姿态分析 · 代码版本 v5.4（2026-10-30）——评分异常时请先确认此版本并强制刷新（Ctrl+F5）");
+console.log("🏀 投篮姿态分析 · 代码版本 v5.5（2026-11-05）——评分异常时请先确认此版本并强制刷新（Ctrl+F5）");
 
 const $ = (id) => document.getElementById(id);
+const esc = escHtml;
 const video = $("video");
 const overlay = $("overlay");
 const octx = overlay.getContext("2d");
@@ -238,7 +239,7 @@ function runReport(archive = true) {
   if (mainView === "front" || mainView === "oblique") chosenSide = pickShootingSide(frames, cycles, chosenSide);
   mainVis = windowVisibility(frames, Object.values(SIDE[chosenSide]), cycle.crouchIdx, cycle.apexIdx);
   // 多次出手逐次计算后取中位数：比单次出手更接近真实水平，也消除「两次分析选中不同出手」的评分漂移
-  const metrics = mergeCycles(cycles.map((c) => computeMetrics(frames, c, chosenSide, type, mainView)));
+  const metrics = mergeCycles(cycles.map((c) => computeMetrics(frames, c, chosenSide, type, mainView, SAMPLE_FPS)));
   const report = buildReport(metrics, type, cycles.length);
   // 存档 + 「较上次」对比（对比基准是存档前的历史，所以先取历史再写入当前记录）
   const cmp = saveToArchive(report, metrics, "主视频", mainView, archive);
@@ -507,10 +508,11 @@ function buildCompareSummary(records, report, source) {
     return records.length ? `历史共 ${records.length} 次分析（投篮类型/来源不同，不比较分数）` : "";
   }
   const parts = [];
-  const delta = report.score - same[0].score;
+  // 导入的档案里分数可能是字符串：一律按数字取，避免比较与求和出错
+  const delta = report.score - Number(same[0].score);
   parts.push(delta === 0 ? "与上次同分" : `较上次 ${delta > 0 ? "+" : ""}${delta} 分`);
-  const scored = same.filter((r) => isFinite(r.score));
-  const avg = (arr) => (arr.length ? arr.reduce((s, r) => s + r.score, 0) / arr.length : null);
+  const scored = same.filter((r) => isFinite(Number(r.score)));
+  const avg = (arr) => (arr.length ? arr.reduce((s, r) => s + Number(r.score), 0) / arr.length : null);
   const recent = avg(scored.slice(0, 3));
   const earlier = avg(scored.slice(3, 6));
   if (recent != null && earlier != null) parts.push(`近 3 次均分 ${recent.toFixed(0)}（此前 ${earlier.toFixed(0)}）`);
@@ -526,7 +528,10 @@ function saveToArchive(report, metrics, source, view, archive = true) {
   const base = comparableRecords(prev, report, source);
   const compare = {};
   for (const m of report.metrics) {
-    const cmp = compareMetric(base, m.id, m.num, { lowerIsBetter: LOWER_IS_BETTER.has(m.id) });
+    const cmp = compareMetric(base, m.id, m.num, {
+      lowerIsBetter: LOWER_IS_BETTER.has(m.id),
+      neutral: NEUTRAL_DIRECTION.has(m.id),
+    });
     if (cmp.count) compare[m.id] = cmp; // 没有历史就不显示「较上次」
   }
   const summary = buildCompareSummary(prev, report, source);
@@ -558,15 +563,15 @@ function renderHistory() {
     return;
   }
   const sum = summarize(records);
-  const scored = records.filter((r) => isFinite(r.score));
-  const avg = (arr) => (arr.length ? arr.reduce((s, r) => s + r.score, 0) / arr.length : null);
+  const scored = records.filter((r) => isFinite(Number(r.score)));
+  const avg = (arr) => (arr.length ? arr.reduce((s, r) => s + Number(r.score), 0) / arr.length : null);
   const recent = avg(scored.slice(0, 3));
   const earlier = avg(scored.slice(3, 6));
   const trendText =
     sum.trend == null ? "样本不足" : sum.trend > 0 ? `↗ 上升 ${sum.trend.toFixed(1)}` : sum.trend < 0 ? `↘ 下降 ${Math.abs(sum.trend).toFixed(1)}` : "→ 持平";
 
   // 评分历史：x 轴用时间戳（图表不画 x 轴刻度，日期在下方记录列表里逐条列出）
-  const scorePts = [...records].reverse().map((r) => ({ x: r.ts, y: r.score })).filter((p) => isFinite(p.y));
+  const scorePts = [...records].reverse().map((r) => ({ x: Number(r.ts), y: Number(r.score) })).filter((p) => isFinite(p.y));
   const scoreChart = lineChart({
     series: [{ label: "得分", color: "#38bdf8", points: scorePts }],
     bands: [{ from: 60, to: 80, color: "rgba(74,222,128,0.16)" }], // 60–80 分参考带
@@ -601,16 +606,16 @@ function renderHistory() {
   const list = records
     .map((r) => {
       const rows = Object.entries(r.metrics ?? {})
-        .map(([id, m]) => `<div class="hist-metric"><span>${METRIC_NAMES[id] ?? m.name ?? id}</span><b>${m.value ?? m.num}</b></div>`)
+        .map(([id, m]) => `<div class="hist-metric"><span>${esc(METRIC_NAMES[id] ?? m.name ?? id)}</span><b>${esc(m.value ?? m.num)}</b></div>`)
         .join("");
       return `
         <li class="hist-item">
           <div class="hist-row">
-            <span class="hist-date">${r.date ?? ""}</span>
-            <span class="hist-type">${TYPE_LABEL[r.type] ?? r.type ?? "—"}</span>
-            <span class="hist-src">${r.source ?? ""}</span>
-            <span class="hist-score">${isFinite(r.score) ? `${r.score} ${r.grade ?? ""}` : "—"}</span>
-            <button class="hist-del" data-id="${r.id}" title="删除这条记录">✕</button>
+            <span class="hist-date">${esc(r.date)}</span>
+            <span class="hist-type">${esc(TYPE_LABEL[r.type] ?? r.type ?? "—")}</span>
+            <span class="hist-src">${esc(r.source)}</span>
+            <span class="hist-score">${isFinite(r.score) ? `${Number(r.score)} ${esc(r.grade)}` : "—"}</span>
+            <button class="hist-del" data-id="${esc(r.id)}" title="删除这条记录">✕</button>
           </div>
           <details><summary>展开 ${Object.keys(r.metrics ?? {}).length} 项指标</summary><div class="hist-metrics">${rows}</div></details>
         </li>`;
@@ -628,9 +633,9 @@ function renderHistory() {
     <h3 class="hist-title">评分历史</h3>
     ${scoreChart || '<p class="report-empty">暂无评分数据。</p>'}
     <h3 class="hist-title">单指标趋势</h3>
-    <select id="history-metric" class="hist-select">${ids.map((id) => `<option value="${id}">${METRIC_NAMES[id] ?? id}</option>`).join("")}</select>
+    <select id="history-metric" class="hist-select">${ids.map((id) => `<option value="${esc(id)}">${esc(METRIC_NAMES[id] ?? id)}</option>`).join("")}</select>
     ${trendChart || '<p class="report-empty">该指标暂无历史读数。</p>'}
-    ${lastNum != null ? `<p class="hint">最近一次：${METRIC_NAMES[metricId] ?? metricId} ${typeof lastNum === "number" ? lastNum.toFixed(2) : lastNum}${metric?.unit ?? ""}</p>` : ""}
+    ${lastNum != null ? `<p class="hint">最近一次：${esc(METRIC_NAMES[metricId] ?? metricId)} ${esc(typeof lastNum === "number" ? lastNum.toFixed(2) : lastNum)}${esc(metric?.unit)}</p>` : ""}
     <h3 class="hist-title">历史记录</h3>
     <ul class="hist-list">${list}</ul>
   `;
@@ -915,7 +920,7 @@ function generateFusion(archive = false) {
   for (const a of analyses) {
     // 每段视频先对多次出手取中位数，再参与跨视频融合
     const per = (a.cycles?.length ? a.cycles : [a.cycle].filter(Boolean))
-      .map((c) => computeMetrics(a.frames, c, a.side, type, a.view));
+      .map((c) => computeMetrics(a.frames, c, a.side, type, a.view, SAMPLE_FPS));
     a.metrics = mergeCycles(per);
   }
 

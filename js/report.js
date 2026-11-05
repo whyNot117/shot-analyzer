@@ -4,6 +4,13 @@ import { lineChart } from "./charts.js";
 
 export const TYPE_LABEL = { jump: "跳投", mid: "中投", free: "罚球", three: "三分" };
 
+// HTML 转义：档案文件可以从外部导入，里面的字段内容不可信——
+// 所有来自记录数据的字段插进 innerHTML 前都要先过这一道
+const ESC_MAP = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+export function escHtml(v) {
+  return String(v ?? "").replace(/[&<>"']/g, (c) => ESC_MAP[c]);
+}
+
 // 个人资料（身高/体重/年龄）：app.js 从 localStorage 载入后注入，报告头部展示
 let userProfile = null;
 export function setProfile(p) {
@@ -31,11 +38,6 @@ const TIPS = {
     bad: "出手方向角 {v}，偏离高效弧线（熟练射手实测 51.4°±3.2，物理建模最优约 52°）：偏低弧线平、易被封盖且砸筐前沿，偏高浪费射程。",
     warn: "出手方向角 {v}，弧线略偏离熟练射手实测带（约 48–55°）。",
     good: "出手方向角 {v}，弧线贴近熟练射手实测值（51.4°±3.2）。",
-  },
-  releaseHeight: {
-    bad: "出手点 {v}，明显偏低于实测射手带（跳投出手手高约为身高的 113%–119%）——出手被压低后弧线受压，封盖风险和落点偏差同时上升。",
-    warn: "出手点 {v}，低于实测射手带下缘（约身高 113%）。",
-    good: "出手点 {v}，落在实测射手带内（身高 113%–119%）。",
   },
   followThrough: {
     bad: "出手后肘角 {v}，跟随动作没有保持伸展——球在离手瞬间受到额外的干扰力，方向控制变差。",
@@ -108,6 +110,31 @@ function tipId(m, type) {
   return m.id;
 }
 
+// 出手高度的区间（与 js/metrics.js 的 releaseHeight 一致：1.05–1.30×身高）
+const RH_LO = 105, RH_HI = 130;
+
+/**
+ * 出手高度的建议文案：两个方向分开写 + 按投篮类型自适应。
+ * 读数低于下缘与高于上缘是两种不同的问题，写成同一句会出现「高于区间却说偏低」的自相矛盾；
+ * 自动识别成罚球时也不能说「跳投出手手高」。
+ */
+function releaseHeightTip(m, type) {
+  const isFree = type === "free";
+  const band = isFree
+    ? `实测射手带（罚球出手点约为身高的 ${RH_LO}%–${RH_HI}%）`
+    : `实测射手带（跳投出手手高约为身高的 ${RH_LO}%–${RH_HI}%）`;
+  const low = m.num < m.lo;
+  if (m.verdict === "good") return `出手点 ${m.value}，落在${band}内。`;
+  if (m.verdict === "warn") {
+    return low
+      ? `出手点 ${m.value}，略低于${band}的下缘——出手被压得偏低，出手角度略压。`
+      : `出手点 ${m.value}，略高于${band}的上缘——出手点偏高，也可能是机位/透视把读数放大了，建议换侧面机位复核。`;
+  }
+  return low
+    ? `出手点 ${m.value}，明显低于${band}——出手被压低后弧线受压，封盖风险和落点偏差同时上升。`
+    : `出手点 ${m.value}，明显高于${band}——出手点偏高，球在头前离手，出手角度更难压住；也可能只是机位/透视把读数放大了，建议换侧面机位复核。`;
+}
+
 // 「较上次」差值的显示格式：数值越大越不需要小数位（角度类 100° 以上不带 .0）
 function formatDelta(delta) {
   const s = Math.abs(delta) >= 100 ? delta.toFixed(0) : delta.toFixed(1);
@@ -146,6 +173,9 @@ export function buildReport(metrics, type, cycleCount = 1) {
     .filter((m) => m.verdict === "warn" || m.verdict === "bad")
     .sort((a, b) => b.weight - a.weight)
     .map((m) => {
+      if (m.id === "releaseHeight") {
+        return { name: m.name, level: m.verdict, value: m.value, frame: m.frame, text: releaseHeightTip(m, type) };
+      }
       const t = TIPS[tipId(m, type)];
       return {
         name: m.name, level: m.verdict, value: m.value, frame: m.frame,
@@ -168,7 +198,10 @@ export function renderReport(el, report, opts = {}) {
     const c = compare[m.id];
     if (!c || c.delta == null || !isFinite(c.delta) || c.delta === 0) return "";
     const better = c.better === true;
-    return `<small class="m-trend ${better ? "good" : "bad"}">${c.delta > 0 ? "↑" : "↓"} 比上次 ${formatDelta(c.delta)}${
+    const worse = c.better === false;
+    // 方向不明的指标（腿臂分离时差等：正值代表顺序正确，不是「越大越好」）不标好坏，只报差值
+    const cls = better ? "good" : worse ? "bad" : "neutral";
+    return `<small class="m-trend ${cls}">${c.delta > 0 ? "↑" : "↓"} 比上次 ${formatDelta(c.delta)}${
       TREND_ONLY.has(m.id) || m.verdict === "info" ? "（趋势）" : ""
     }</small>`;
   };

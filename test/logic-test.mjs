@@ -5,7 +5,7 @@ import {
 } from "../js/metrics.js";
 import { isHevcFile, makePersonPicker } from "../js/media.js";
 import { classifyView, windowVisibility, coverageGaps } from "../js/views.js";
-import { buildReport } from "../js/report.js";
+import { buildReport, escHtml } from "../js/report.js";
 import { SIDE, pickSide, pickShootingSide, angleAt } from "../js/draw.js";
 
 const ASPECT = 1080 / 1920; // 竖屏视频宽高比
@@ -344,6 +344,24 @@ check("auto 报告带 autoType 标记", buildReport(sideMetrics, "auto").autoTyp
 check("指标附带回看帧号", typeof sideMetrics.find((m) => m.id === "releaseHeight")?.frame === "number");
 const singleReportTips = buildReport(sideMetrics, "jump").tips;
 check("建议文本已替换 {v} 占位符", singleReportTips.every((t) => !t.text.includes("{v}")));
+
+// 出手高度：读数高于区间上缘时，文案不能说「偏低」；自动识别成罚球时也不能说「跳投出手手高」
+const rhTip = (num, type) => {
+  const ms = sideMetrics.map((m) => (m.id === "releaseHeight" ? { ...m, num, value: num.toFixed(2) } : m));
+  return buildReport(ms, type).tips.find((t) => t.name === "出手高度")?.text ?? "";
+};
+check("出手高度偏高（1.32）说的是偏高不是偏低", /高于/.test(rhTip(1.32, "jump")) && !/低于/.test(rhTip(1.32, "jump")), rhTip(1.32, "jump"));
+check("出手高度偏高（1.55）说的是偏高不是偏低", /高于/.test(rhTip(1.55, "jump")) && !/低于/.test(rhTip(1.55, "jump")), rhTip(1.55, "jump"));
+check("出手高度偏低说的是偏低", /低于/.test(rhTip(0.98, "jump")), rhTip(0.98, "jump"));
+check("罚球口径不说「跳投出手手高」", !/跳投/.test(rhTip(1.55, "free")), rhTip(1.55, "free"));
+check("跳投口径保留「跳投出手手高」", /跳投/.test(rhTip(1.55, "jump")), rhTip(1.55, "jump"));
+
+// 档案可以外部导入：字段进 innerHTML 前必须转义（报告渲染层的 escHtml）
+const hostile = `<img src=x onerror="alert('x')">`;
+check("escHtml 转义尖括号与引号", !/[<>"]/.test(escHtml(hostile)), escHtml(hostile));
+check("escHtml 转义 & 与单引号",
+  !escHtml("a & b 'c'").includes("'") && !escHtml("a & b 'c'").includes(" & "), escHtml("a & b 'c'"));
+check("escHtml 处理空值", escHtml(undefined) === "" && escHtml(null) === "");
 
 console.log("— 融合合并（复刻 app.js generateFusion 逻辑）—");
 const viewsOf = (a) => (a.view === "oblique" ? ["side", "front"] : [a.view === "unknown" ? "side" : a.view]);
