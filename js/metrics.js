@@ -592,3 +592,38 @@ export function standingBodyHeight(frames, cycle, sideName) {
   const h = Math.abs(sh.y - an.y);
   return h > 0.01 ? h : null; // 过小视为异常
 }
+
+/**
+ * 关键动作曲线：一次代表性出手的肘角/膝角逐帧读数，供报告画图。
+ * x 轴是「相对出手帧的秒数」（读者看得懂，而不是帧号），区间为出手前 1.0s ~ 出手后 0.5s。
+ * 事件竖线标注：下蹲（crouchIdx）、举球（setIdx）、出手（releaseIdx）、跟随（apexIdx）。
+ * 举球点的取法与 computeMetrics 一致——下蹲到出手之间肘角最小的帧。
+ */
+export function cycleCurves(frames, cycle, sideName, fps = 30) {
+  const s = SIDE[sideName];
+  const { releaseIdx, crouchIdx, apexIdx } = cycle;
+  const n = frames.length;
+  const elbow = angleSeries(frames, s.shoulder, s.elbow, s.wrist);
+  const knee = angleSeries(frames, s.hip, s.knee, s.ankle);
+
+  let setIdx = crouchIdx;
+  for (let i = crouchIdx; i < releaseIdx; i++) if (elbow[i] < elbow[setIdx]) setIdx = i;
+
+  const from = Math.max(0, releaseIdx - Math.round(fps * 1.0));
+  const to = Math.min(n - 1, releaseIdx + Math.round(fps * 0.5));
+  const x = (i) => (i - releaseIdx) / fps;
+  const slice = (series) => {
+    const out = [];
+    for (let i = from; i <= to; i++) out.push({ x: x(i), y: series[i] });
+    return out;
+  };
+  const events = [];
+  const mark = (idx, label) => {
+    if (isFinite(idx)) events.push({ x: x(idx), label });
+  };
+  mark(crouchIdx, "下蹲");
+  mark(setIdx, "举球");
+  mark(releaseIdx, "出手");
+  mark(apexIdx, "跟随");
+  return { elbow: slice(elbow), knee: slice(knee), events };
+}

@@ -1,5 +1,6 @@
 // 评分规则引擎与报告渲染：指标 → 评分/评级 → 针对性中文建议（不依赖任何外部服务）
 import { JUMP_MIN, TREND_ONLY } from "./metrics.js";
+import { lineChart } from "./charts.js";
 
 export const TYPE_LABEL = { jump: "跳投", mid: "中投", free: "罚球", three: "三分" };
 
@@ -71,6 +72,12 @@ const TIPS = {
     bad: "动作过程左右重心偏移 {v}，两侧发力不对称。",
     warn: "左右重心偏移 {v}，两侧受力略有差异。",
     good: "左右重心偏移 {v}，出手对称性良好。",
+  },
+  // 出手伸肘速度：只讲原因不给方法（口径见 docs/投篮理解.md 4️⃣）
+  elbowSpeed: {
+    bad: "出手伸肘速度 {v}，明显慢于文献实测带（高水平球员随距离 2.8→6.4 m，肘角速度 539→742°/s）——伸肘推球的过程拖得太长，球是被\"匀速推\"出去的，远距离时这个差异会直接放大成射程不足。",
+    warn: "出手伸肘速度 {v}，伸肘速度低于实测带下缘——出球过程偏\"匀速推\"，还够不上快速释放。",
+    good: "出手伸肘速度 {v}，伸肘释放速度落在实测带内。",
   },
   // 起跳指标按类型取不同文案
   jumpShot: {
@@ -188,6 +195,25 @@ export function renderReport(el, report, opts = {}) {
     )
     .join("");
 
+  // 关键动作曲线：一次代表性出手的肘角/膝角逐帧读数（x 轴是相对出手帧的秒数）
+  const curves = opts.curves;
+  const curveCard = curves
+    ? `<div class="curve-card">
+        <h3>📈 关键动作曲线</h3>
+        ${lineChart({
+          series: [
+            { label: "肘角", color: "#38bdf8", points: curves.elbow ?? [] },
+            { label: "膝角", color: "#f97316", points: curves.knee ?? [] },
+          ],
+          events: curves.events ?? [],
+          xLabel: "相对出手时刻（秒）",
+          yUnit: "°",
+          height: 180,
+        })}
+        <p class="hint">竖线依次标出下蹲 / 举球 / 出手 / 跟随四个关键节点。${opts.curveNote ?? ""}</p>
+      </div>`
+    : "";
+
   const pfBits = [
     userProfile?.height && `身高 ${userProfile.height}cm`,
     userProfile?.weight && `体重 ${userProfile.weight}kg`,
@@ -207,6 +233,7 @@ export function renderReport(el, report, opts = {}) {
       </div>
     </div>
     <div class="metric-list">${rows}</div>
+    ${curveCard}
     <div class="tips">
       <h3>🔧 问题与原因（按重要性排序）</h3>
       ${tips || "<p>全部指标达标，保持当前动作！</p>"}

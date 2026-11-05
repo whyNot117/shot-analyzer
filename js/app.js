@@ -1,7 +1,7 @@
 // 应用主流程：选视频 → 逐帧扫描姿态 → 播放时叠加骨架
 import { getLandmarker, resetLandmarker, nextTimestamp, beginScan } from "./pose.js";
 import { drawFrame, pickSide, pickShootingSide, SIDE } from "./draw.js";
-import { detectShotCycles, mergeCycles, computeMetrics, standingBodyHeight, METRIC_NAMES, METRIC_VIEWS, LOWER_IS_BETTER } from "./metrics.js";
+import { detectShotCycles, mergeCycles, computeMetrics, cycleCurves, standingBodyHeight, METRIC_NAMES, METRIC_VIEWS, LOWER_IS_BETTER } from "./metrics.js";
 import { buildReport, renderReport, TYPE_LABEL, setProfile } from "./report.js";
 import { classifyView, VIEW_LABEL, coverageGaps, windowVisibility, courtGuideSVG } from "./views.js";
 import { normalizeSequence, dtwAlign, jointDeviations, JOINT_LABEL, JOINT_ADVICE } from "./compare.js";
@@ -236,9 +236,13 @@ function runReport(archive = true) {
   const report = buildReport(metrics, type, cycles.length);
   // 存档 + 「较上次」对比（对比基准是存档前的历史，所以先取历史再写入当前记录）
   const cmp = saveToArchive(report, metrics, "主视频", mainView, archive);
+  // 关键动作曲线：用第一个（代表性）出手画肘角/膝角走势
+  const curves = cycle ? cycleCurves(frames, cycle, chosenSide, SAMPLE_FPS) : null;
   renderReport(body, report, {
     jump: true, note: rejectNote, // 建议卡可点击回看视频瞬间
     compare: cmp.compare, compareSummary: cmp.summary,
+    curves,
+    curveNote: mainView === "front" ? "正面机位读数为投影角，参考意义有限。" : "",
   });
   renderGapCard(body);
   body.scrollIntoView({ behavior: "smooth", block: "start" });
