@@ -2,3 +2,10 @@
 server.log
 server.err.log
 node_modules/
+
+# 本地素材不入库：真实素材端到端验证（tools/e2e-real.mjs）需要把视频放在站点根目录下，
+# 那是仓库根目录——加这条免得误把个人视频提交进版本库
+*.mp4
+*.mov
+*.m4v
+*.webm
