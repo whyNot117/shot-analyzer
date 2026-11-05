@@ -313,6 +313,8 @@ export const METRIC_NAMES = {
   elbowSpeed: "出手伸肘速度", legArmDelay: "腿臂分离时差", legSeq: "下肢发力顺序差",
   moveDist: "出手前移动距离", moveSpeed: "出手前移动速度",
   takeoffTiming: "起跳-出手时序", dipAmount: "沉球量",
+  releaseVel: "出手垂直速度", takeoffRiseSpeed: "起跳上升速度",
+  kneeAsym: "双膝角度差", trunkSideTilt: "躯干侧倾",
 };
 
 // 每项指标在哪些机位下测得可靠（融合报告按此挑来源；oblique 视为两向近似可用）
@@ -326,6 +328,9 @@ export const METRIC_VIEWS = {
   elbowSpeed: ["side", "front"], legArmDelay: ["side"], legSeq: ["side"],
   // 场景专属指标：移动距离/速度只有移动出手才有意义，沉球量只有接球即投才有意义
   moveDist: ["side"], moveSpeed: ["side"], takeoffTiming: ["side", "front"], dipAmount: ["side"],
+  // v5.6 新增：出手/起跳速度是纯垂直量，两种机位都测；膝角差与躯干侧倾只有正面机位才读得出来
+  releaseVel: ["side", "front"], takeoffRiseSpeed: ["side", "front"],
+  kneeAsym: ["front"], trunkSideTilt: ["front"],
 };
 
 // 趋势参考型指标：运动学上可测但缺少专项文献阈值，不计分，靠训练档案的历史趋势看变化
@@ -334,6 +339,8 @@ export const TREND_ONLY = new Set([
   // 场景专属指标没有文献锚点，一律按趋势参考型处理（同时登记进 TREND_ONLY，
   // 否则 buildReport 会把它们当成计分项，缺文献依据的区间会把分数带偏）
   "moveDist", "moveSpeed", "takeoffTiming", "dipAmount",
+  // v5.6 新增的 4 项同样没有可靠的篮球专项文献阈值，只作趋势参考
+  "releaseVel", "takeoffRiseSpeed", "kneeAsym", "trunkSideTilt",
 ]);
 
 // 越小越好的指标：训练档案的「较上次」对比按数值增减方向判断好坏会判反，
@@ -341,12 +348,20 @@ export const TREND_ONLY = new Set([
 // 逐个核对过：头部晃动、重心横移确实越小越好。
 // 腿臂分离时差不在这里——它的口径是「正值 = 下肢领先上肢」（自下而上的发力链），
 // 数值变大不代表更差，把它当「越小越好」会把正确的发力顺序判成退步
-export const LOWER_IS_BETTER = new Set(["headDrift", "balance"]);
+export const LOWER_IS_BETTER = new Set([
+  "headDrift", "balance",
+  // v5.6：双膝角度差与躯干侧倾都是「越接近 0 越对称/越平衡」，数值变大不是变好
+  "kneeAsym", "trunkSideTilt",
+]);
 
 // 方向不明的指标：腿臂分离时差、下肢发力顺序差都是「正值 = 顺序正确」的时序读数，
 // 理想状态是下肢略领先一点点——变大不等于更好，变小也不等于更差。
 // 这类指标的「较上次」只报差值，不标变好/变差
-export const NEUTRAL_DIRECTION = new Set(["legArmDelay", "legSeq"]);
+export const NEUTRAL_DIRECTION = new Set([
+  "legArmDelay", "legSeq",
+  // v5.6：出手/起跳速度没有「越快越好」的文献依据（快到失控也是问题），只报差值
+  "releaseVel", "takeoffRiseSpeed",
+]);
 
 // 髋部开始持续上升（离地）的帧：从该帧起连续三帧髋部都在上升才算起跳起点，
 // 单帧抖动（EPS 以下）不算起跳——否则站着不动也会测出一个「起跳时刻」
@@ -359,9 +374,42 @@ function findTakeoff(hip, crouchIdx, releaseIdx) {
 }
 
 /**
+ * 视频级体高尺度：全程所有有效帧的 (肩y − 踝y) 的 90 分位。
+ *
+ * 为什么必须是「全程尺度」而不是「站姿帧尺度」：
+ * ① 分子分母必须出自同一尺度体系。出手高度是「出手帧的 踝→腕 垂直距离 ÷ 身高」，
+ *    分子取自出手帧（人已腾空、常常更靠近镜头），如果分母取站姿帧那一帧，
+ *    两个尺度来自不同时刻——正面机位下出手前朝篮筐走近（也就是朝镜头走），
+ *    出手帧的尺度大于站姿帧，比值被人为放大（实测素材上读到 1.55 / 1.32 就是这么来的）。
+ * ② 站姿帧本身可能取到屈膝没伸直的状态，肩−踝 距离偏小 → 分母偏小 → 比值进一步放大。
+ * ③ 取 90 分位而不是 max：单帧异常（离场空档、瞬时姿态抖动）不会把尺度整体拉大，
+ *    90 分位既代表「站得最直时」的尺度上限附近，又对离群帧稳健。
+ *
+ * 只用于「以身高为单位」且分子取自出手帧的指标（目前只有出手高度）；
+ * 起跳幅度、重心横移、头部晃动等仍用站姿帧基线，语义不动。
+ */
+export function bodyHeightScale(frames, sideName) {
+  const s = SIDE[sideName];
+  const shoulder = smooth(fillGaps(pointsOf(frames, s.shoulder)));
+  const ankle = smooth(fillGaps(pointsOf(frames, s.ankle)));
+  const hs = [];
+  for (let i = 0; i < frames.length; i++) {
+    const lm = frames[i]?.landmarks;
+    // 空档帧是插值出来的、缺关键点的帧被 smooth 补成 0，都不算真实尺度
+    if (!lm || !lm[s.shoulder] || !lm[s.ankle]) continue;
+    const h = Math.abs(shoulder[i].y - ankle[i].y);
+    if (isFinite(h) && h > 1e-4) hs.push(h);
+  }
+  if (!hs.length) return 0;
+  hs.sort((a, b) => a - b);
+  return hs[Math.max(0, Math.ceil(hs.length * 0.9) - 1)];
+}
+
+/**
  * 计算单次出手的投篮姿态指标。type: "jump" | "free" | "three"；view: "side" | "front" | "oblique" | "unknown"。
  * 矢状面指标（膝角/出手角等）只在侧面类机位下计算；正面指标（肘内外展/站距/左右重心）只在正面类机位下计算；
- * 出手高度与起跳为纯垂直量，两种机位都有效。关键帧读数按类型取稳健估计：极值点（下蹲/举球/跟随）
+ * 双膝角度差与躯干侧倾严格限定正面机位（斜侧的透视畸变太大，读数不可信）；
+ * 出手高度与起跳为纯垂直量，两种机位都有效；出手垂直速度与起跳上升速度两种机位都测。关键帧读数按类型取稳健估计：极值点（下蹲/举球/跟随）
  * 用三点抛物线顶点细化，缓变段用邻域中位数——极值点取中位数会被推离谷底（已实测回归）；
  * 多次出手请对各周期的结果调用 mergeCycles 取中位数。
  * 返回指标数组，每项含 { id, name, num, unit, lo, hi, weight, rangeText, value }。
@@ -390,8 +438,13 @@ export function computeMetrics(frames, cycle, sideName, type = "jump", view = "s
   // 站姿体高（肩到踝）：站姿帧邻域中位数，作为所有归一化的分母
   const bodyH = median(winIdx(standIdx).map((i) => Math.abs(shoulder[i].y - ankle[i].y))) || 1e-6;
 
-  // 出手高度：出手时腕高于踝的距离 / 站姿体高（纯垂直量，各机位有效，邻域中位数）
-  const releaseHeight = median(winIdx(releaseIdx).map((i) => (ankle[i].y - wrist[i].y) / bodyH));
+  // 视频级体高尺度（全程 90 分位）：出手高度的归一化分母。
+  // 与其它指标不同——出手高度的分子取自出手帧，分母必须出自同一尺度体系，
+  // 用站姿帧尺度会把读数放大（详见 bodyHeightScale 的注释）。
+  const bodyScale = bodyHeightScale(frames, sideName) || bodyH;
+
+  // 出手高度：出手时腕高于踝的距离 / 视频级体高尺度（纯垂直量，各机位有效，邻域中位数）
+  const releaseHeight = median(winIdx(releaseIdx).map((i) => (ankle[i].y - wrist[i].y) / bodyScale));
 
   // 起跳幅度：出手时髋部相对站姿的抬升（纯垂直量，各机位有效，邻域中位数）
   const jumpRise = median(winIdx(releaseIdx).map((i) => (hip[standIdx].y - hip[i].y) / bodyH));
@@ -505,6 +558,25 @@ export function computeMetrics(frames, cycle, sideName, type = "jump", view = "s
     frame: releaseIdx, warnLo: 300, warnHi: 1100,
   });
 
+  // 出手垂直速度（×身高/s，趋势参考）：出手时腕部向上的速度。
+  // 取值方式与 elbowSpeed 一致——±2 帧跨度求斜率（单帧差分噪声太大），出手窗内取正向峰值。
+  // 没有可靠的专项文献阈值（快到失控同样是问题），只作趋势参考，不计分、不出建议。
+  const releaseVel = (() => {
+    const vals = [];
+    for (let i = releaseIdx - 3; i <= releaseIdx + 2; i++) {
+      const a = wrist[i - 2], b = wrist[i + 2];
+      if (!a || !b || !Number.isFinite(a.y) || !Number.isFinite(b.y)) continue;
+      vals.push(((a.y - b.y) * fps) / 4); // y 向下为正：y 变小 = 腕部在往上走
+    }
+    const pos = vals.filter((v) => v > 0);
+    return pos.length ? Math.max(...pos) / bodyScale : NaN;
+  })();
+  add("releaseVel", "出手垂直速度", releaseVel, "×身高/s", 0, 99, 1, {
+    verdictOverride: "info", screeningOnly: true,
+    rangeText: "出手瞬间腕部向上的速度（趋势参考）",
+    frame: releaseIdx,
+  });
+
   // 发力链时序（趋势参考）：下肢蹬伸与上肢伸出的先后关系。
   // 测法：膝/髋/肘角速度的峰值往前回溯到 25% 处，取该次主要发力的启动帧，再换算成时间差。
   if (sagittal) {
@@ -557,6 +629,24 @@ export function computeMetrics(frames, cycle, sideName, type = "jump", view = "s
       rangeText: "正值 = 起跳早于出手（趋势参考）",
       frame: releaseIdx,
     });
+
+    // 起跳上升速度（×身高/s，趋势参考）：腾空段髋部上升速度的峰值。
+    // 同样用 ±2 帧跨度求斜率，避免单帧差分噪声；只在检得起跳（起跳类）时才产出。
+    const takeoffRiseSpeed = (() => {
+      const vals = [];
+      for (let i = takeoffIdx; i <= releaseIdx; i++) {
+        const a = hip[i - 2], b = hip[i + 2];
+        if (!a || !b || !Number.isFinite(a.y) || !Number.isFinite(b.y)) continue;
+        vals.push(((a.y - b.y) * fps) / 4); // y 向下为正：y 变小 = 髋部在上升
+      }
+      const pos = vals.filter((v) => v > 0);
+      return pos.length ? Math.max(...pos) / bodyScale : NaN;
+    })();
+    add("takeoffRiseSpeed", "起跳上升速度", takeoffRiseSpeed, "×身高/s", 0, 99, 1, {
+      verdictOverride: "info", screeningOnly: true,
+      rangeText: "腾空段髋部上升速度峰值（趋势参考）",
+      frame: takeoffIdx,
+    });
   }
 
   if (sagittal && scene === "catch") {
@@ -572,13 +662,13 @@ export function computeMetrics(frames, cycle, sideName, type = "jump", view = "s
     });
   }
 
-  if (frontal) {
-    // 单帧取点（含宽高比校正），关键点缺失则跳过对应帧
-    const lm = (i, idx) => {
-      const l = frames[i]?.landmarks?.[idx];
-      return l ? { x: l.x * aspect, y: l.y } : null;
-    };
+  // 单帧取点（含宽高比校正），关键点缺失则跳过对应帧
+  const lm = (i, idx) => {
+    const l = frames[i]?.landmarks?.[idx];
+    return l ? { x: l.x * aspect, y: l.y } : null;
+  };
 
+  if (frontal) {
     // 肘内外展：举球点肘部偏离「肩→腕」连线的角度（正面视角，0° = 肘在肩腕线上不外展），
     // 举球点邻域逐帧求角后取中位数。
     // good 上限 15°：锚定 Cabarkapa 2021 熟练组前臂外展均值 7.9°+1SD；20° 会把非熟练组均值(19.8°)判为达标
@@ -630,6 +720,47 @@ export function computeMetrics(frames, cycle, sideName, type = "jump", view = "s
         verdictOverride: "info", screeningOnly: true,
         rangeText: "越稳定越好（趋势参考）",
         frame: standIdx,
+      });
+    }
+  }
+
+  // ---------- 正面专属指标（严格限定正面机位） ----------
+  // 斜侧机位下双肩连线的透视畸变过大，侧倾读数不可信，因此这两项只在正机位产出。
+  if (view === "front") {
+    // 双膝角度差（°）：左右膝角之差，出手窗内取中位数 → 左右腿发力是否对称
+    // （对应 docs/投篮理解.md 5️⃣ 的左右力量差）
+    const kneeL = angleSeries(frames, 23, 25, 27);
+    const kneeR = angleSeries(frames, 24, 26, 28);
+    const asym = [];
+    for (const i of winIdx(releaseIdx)) {
+      const a = kneeL[i], b = kneeR[i];
+      if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+      asym.push(Math.abs(a - b));
+    }
+    if (asym.length) {
+      add("kneeAsym", "双膝角度差", median(asym), "°", 0, 90, 1, {
+        verdictOverride: "info", screeningOnly: true,
+        rangeText: "左右膝角之差，越小越对称（趋势参考）",
+        frame: releaseIdx,
+      });
+    }
+
+    // 躯干侧倾（°）：双肩连线相对水平线的倾角，出手窗内取中位数 → 侧向平衡
+    // （对应 docs/投篮理解.md 3️⃣ 的平衡与稳定）
+    const tilt = [];
+    for (const i of winIdx(releaseIdx)) {
+      const sh1 = lm(i, 11), sh2 = lm(i, 12);
+      if (!sh1 || !sh2) continue;
+      const dx = sh2.x - sh1.x;
+      const dy = sh2.y - sh1.y;
+      if (!Number.isFinite(dx) || !Number.isFinite(dy)) continue;
+      tilt.push((Math.atan2(Math.abs(dy), Math.abs(dx)) * 180) / Math.PI);
+    }
+    if (tilt.length) {
+      add("trunkSideTilt", "躯干侧倾", median(tilt), "°", 0, 45, 1, {
+        verdictOverride: "info", screeningOnly: true,
+        rangeText: "双肩连线相对水平线的倾角（趋势参考）",
+        frame: releaseIdx,
       });
     }
   }

@@ -99,7 +99,7 @@ check("双球视频检出 2 次出手", twoDetect.cycles.length === 2, `n=${twoD
 const mergedTwo = mergeCycles(twoDetect.cycles.map((c) => computeMetrics(twoShotFrames, c, sideDetect.side, "jump", "side")));
 const singleReport = buildReport(computeMetrics(sideFrames, sideCycle, sideDetect.side, "jump", "side"), "jump");
 const mergedReport = buildReport(mergedTwo, "jump", 2);
-check("双球合并后 14 项侧面指标无缺失", mergedTwo.length === 14, `n=${mergedTwo.length}`);
+check("双球合并后 16 项侧面指标无缺失", mergedTwo.length === 16, `n=${mergedTwo.length}`);
 check("两次相同出手的合并评分与单次一致", mergedReport.score === singleReport.score,
   `${mergedReport.score} vs ${singleReport.score}`);
 check("合并报告标注出手次数", mergedReport.cycleCount === 2);
@@ -108,7 +108,11 @@ console.log("— 指标计算（按机位门控）—");
 const sideMetrics = computeMetrics(sideFrames, sideCycle, sideDetect.side, "jump", "side");
 const sideIds = new Set(sideMetrics.map((m) => m.id));
 check("侧面含膝角/举球肘角/出手角", ["kneeCrouch", "elbowSet", "releaseAngle"].every((id) => sideIds.has(id)));
-check("侧面不含正面指标", !["elbowAbduction", "stanceWidth", "lateralBalance"].some((id) => sideIds.has(id)));
+check("侧面不含正面指标",
+  !["elbowAbduction", "stanceWidth", "lateralBalance", "kneeAsym", "trunkSideTilt"].some((id) => sideIds.has(id)));
+// v5.6：出手/起跳速度是纯垂直量，侧面正面都该测得到
+check("侧面含出手垂直速度/起跳上升速度",
+  ["releaseVel", "takeoffRiseSpeed"].every((id) => sideIds.has(id)));
 check("侧面指标值全部有限", sideMetrics.every((m) => isFinite(m.num)));
 check("跳投标准下起跳达标", buildReport(sideMetrics, "jump").metrics.find((m) => m.id === "jump")?.verdict === "good");
 // 起跳判定在报告阶段按类型进行（多次出手取中位数后才能正确判定），同一份指标可直接换类型评估
@@ -118,8 +122,13 @@ const frontMetrics = computeMetrics(frontFrames, frontDetect.cycles[0], frontSid
 const frontIds = new Set(frontMetrics.map((m) => m.id));
 check("正面含肘内外展/站距/左右重心", ["elbowAbduction", "stanceWidth", "lateralBalance"].every((id) => frontIds.has(id)));
 check("正面不含矢状面指标", !["kneeCrouch", "releaseAngle", "trunkLean"].some((id) => frontIds.has(id)));
+// v5.6：正面机位专有的两项新指标（膝角差 / 躯干侧倾）
+check("正面含双膝角度差/躯干侧倾", ["kneeAsym", "trunkSideTilt"].every((id) => frontIds.has(id)));
+check("正面同样含出手垂直速度/起跳上升速度",
+  ["releaseVel", "takeoffRiseSpeed"].every((id) => frontIds.has(id)));
 check("正面仍测出手高度/起跳", frontIds.has("releaseHeight") && frontIds.has("jump"));
 check("正面指标值全部有限", frontMetrics.every((m) => isFinite(m.num)));
+check("正面产出 11 项指标", frontMetrics.length === 11, `n=${frontMetrics.length}`);
 const frontReport = buildReport(frontMetrics, "jump");
 check("站距 0.75×肩宽 落入 good（文献修正区间 0.7–1.5）",
   frontReport.metrics.find((m) => m.id === "stanceWidth")?.verdict === "good");
@@ -131,7 +140,7 @@ const allIds = new Set([...sideIds, ...frontIds]);
 // 场景专属指标（移动/接球才有）：定点站投的视频里不该出现，也就不该「对得上」
 const SCENE_ONLY = ["moveDist", "moveSpeed", "dipAmount"];
 const coreIds = Object.keys(METRIC_VIEWS).filter((id) => !SCENE_ONLY.includes(id));
-check("指标注册共 20 项（16 核心 + 4 场景专属）", Object.keys(METRIC_VIEWS).length === 20,
+check("指标注册共 24 项（20 核心 + 4 场景专属）", Object.keys(METRIC_VIEWS).length === 24,
   `n=${Object.keys(METRIC_VIEWS).length}`);
 check("核心指标 id 全部对得上（场景专属项除外）", coreIds.every((id) => allIds.has(id)),
   [...coreIds.filter((id) => !allIds.has(id))].join(","));
