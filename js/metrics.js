@@ -97,6 +97,45 @@ function median3(s) {
   });
 }
 
+// ---------- 角速度与发力时序（v5.5 新增） ----------
+
+// 关节角速度序列（度/秒）：中心差分后做 3 点中位数滤波，压住单帧毛刺
+function angularSpeed(series, fps) {
+  const v = series.map((val, i) => {
+    const a = series[i - 1], b = series[i + 1];
+    if (!isFinite(a) || !isFinite(b)) return NaN;
+    return ((b - a) * fps) / 2;
+  });
+  return median3(v);
+}
+
+/**
+ * 发力启动帧：在 [from,to] 窗口内找角速度峰值，再从峰值往前回溯到峰值的 frac 处，
+ * 即「这一次主要发力是从哪一帧开始的」。找不到有效峰值返回 null。
+ */
+function onsetFrame(vel, from, to, frac = 0.25) {
+  let peak = -Infinity, peakIdx = -1;
+  for (let i = Math.max(0, from); i <= Math.min(vel.length - 1, to); i++) {
+    const v = vel[i];
+    if (!isFinite(v)) continue;
+    if (v > peak) { peak = v; peakIdx = i; }
+  }
+  if (peakIdx < 0 || !(peak > 1e-6)) return null;
+  const th = peak * frac;
+  for (let i = peakIdx; i >= Math.max(0, from); i--) {
+    const v = vel[i];
+    if (isFinite(v) && v >= th) return i;
+  }
+  return Math.max(0, from);
+}
+
+// 指标的显示值：角度取整、角速度取整、时差取整毫秒，其余两位小数
+export function formatMetricValue(id, num, unit) {
+  if (id === "jump") return num > JUMP_MIN ? "有起跳" : "基本贴地";
+  if (unit === "°" || unit === "°/s" || unit === "ms" || unit === "s") return `${Math.round(num)}${unit}`;
+  return num.toFixed(2);
+}
+
 /**
  * 检测视频中的全部出手周期（一段视频练多球时逐次录取，报告取中位数）。
  * 出手帧候选：手腕高于肩部、向上速度明显且为 ±3 帧内局部极大的帧；
@@ -279,10 +318,7 @@ export function mergeCycles(cyclesMetrics) {
     out.push({
       ...first, // 区间/权重/容差带/verdictOverride 等口径各周期一致，取第一个即可
       num,
-      value:
-        id === "jump"
-          ? num > JUMP_MIN ? "有起跳" : "基本贴地"
-          : first.unit === "°" ? `${Math.round(num)}°` : num.toFixed(2),
+      value: formatMetricValue(id, num, first.unit),
     });
   }
   return out; // 已按 METRIC_VIEWS 固定顺序
@@ -296,6 +332,7 @@ export const METRIC_NAMES = {
   releaseAngle: "出手方向角", releaseHeight: "出手高度", followThrough: "跟随动作伸展",
   trunkLean: "躯干倾斜", headDrift: "头部晃动", balance: "重心横移", jump: "起跳幅度",
   elbowAbduction: "肘内外展", stanceWidth: "双脚站距", lateralBalance: "左右重心偏移",
+  elbowSpeed: "出手伸肘速度", legArmDelay: "腿臂分离时差", legSeq: "下肢发力顺序差",
 };
 
 // 每项指标在哪些机位下测得可靠（融合报告按此挑来源；oblique 视为两向近似可用）
@@ -305,7 +342,12 @@ export const METRIC_VIEWS = {
   followThrough: ["side"], trunkLean: ["side"], headDrift: ["side"],
   balance: ["side"], jump: ["side", "front"],
   elbowAbduction: ["front"], stanceWidth: ["front"], lateralBalance: ["front"],
+  // 伸肘速度是纯角度量，正面机位同样可测；发力链时序依赖矢状面内的关节顺序，只在侧面类可信
+  elbowSpeed: ["side", "front"], legArmDelay: ["side"], legSeq: ["side"],
 };
+
+// 趋势参考型指标：运动学上可测但缺少专项文献阈值，不计分，靠训练档案的历史趋势看变化
+export const TREND_ONLY = new Set(["legArmDelay", "legSeq", "lateralBalance"]);
 
 /**
  * 计算单次出手的投篮姿态指标。type: "jump" | "free" | "three"；view: "side" | "front" | "oblique" | "unknown"。
@@ -315,7 +357,7 @@ export const METRIC_VIEWS = {
  * 多次出手请对各周期的结果调用 mergeCycles 取中位数。
  * 返回指标数组，每项含 { id, name, num, unit, lo, hi, weight, rangeText, value }。
  */
-export function computeMetrics(frames, cycle, sideName, type = "jump", view = "side") {
+export function computeMetrics(frames, cycle, sideName, type = "jump", view = "side", fps = 30) {
   const s = SIDE[sideName];
   const { releaseIdx, crouchIdx, standIdx, apexIdx } = cycle;
   const aspect = frames[0]?.aspect ?? 1; // 单帧取点时的宽高比校正（序列取点由 pointsOf 处理）
@@ -354,7 +396,7 @@ export function computeMetrics(frames, cycle, sideName, type = "jump", view = "s
     M.push({
       id, name, num, unit, lo, hi, weight,
       rangeText: unit === "°" ? `${Math.round(lo)}–${Math.round(hi)}°` : `${lo}–${hi}${unit}`,
-      value: unit === "°" ? `${Math.round(num)}°` : num.toFixed(2),
+      value: formatMetricValue(id, num, unit),
       ...opts, // 可覆盖 rangeText 等，或附 warnLo/warnHi（不对称容差带）、verdictOverride（如 info）
     });
   };
@@ -414,6 +456,46 @@ export function computeMetrics(frames, cycle, sideName, type = "jump", view = "s
     add("trunkLean", "躯干倾斜", trunkLean, "°", 0, 12, 2, { frame: releaseIdx });
     add("headDrift", "头部晃动", headDrift, "×身高", 0, 0.15, 1, { frame: releaseIdx });
     add("balance", "重心横移", hipDrift, "×身高", 0, 0.12, 1, { frame: releaseIdx });
+  }
+
+  // 出手伸肘速度（°/s）：出手时刻肘关节的角速度。
+  // 文献锚点：高水平球员随距离 2.8→6.4 m，肘角速度 539→742°/s——「匀速推」是远投失败模式
+  // （docs/投篮理解.md 4️⃣：不要持续向上推球，需要更快速度的伸肘）。
+  // 2D 投影只能测到矢状面内的角度变化率，读数可能低于三维真值，故下限放宽到 300。
+  const elbowSpeed = (() => {
+    const vals = [];
+    for (let i = releaseIdx - 3; i <= releaseIdx + 2; i++) {
+      const a = elbow[i - 2], b = elbow[i + 2];
+      if (!isFinite(a) || !isFinite(b)) continue;
+      vals.push(((b - a) * fps) / 4); // ±2 帧跨度：单帧差分噪声大，跨度再大又会拉低峰值
+    }
+    const pos = vals.filter((v) => v > 0);
+    return pos.length ? Math.max(...pos) : NaN;
+  })();
+  add("elbowSpeed", "出手伸肘速度", elbowSpeed, "°/s", 450, 900, 1.5, {
+    frame: releaseIdx, warnLo: 300, warnHi: 1100,
+  });
+
+  // 发力链时序（趋势参考）：下肢蹬伸与上肢伸出的先后关系。
+  // 测法：膝/髋/肘角速度的峰值往前回溯到 25% 处，取该次主要发力的启动帧，再换算成时间差。
+  if (sagittal) {
+    const hipAngle = angleSeries(frames, s.shoulder, s.hip, s.knee);
+    const tKnee = onsetFrame(angularSpeed(knee, fps), crouchIdx, releaseIdx);
+    const tHip = onsetFrame(angularSpeed(hipAngle, fps), crouchIdx, releaseIdx);
+    const tElbow = onsetFrame(angularSpeed(elbow, fps), setIdx, releaseIdx);
+    const gapMs = (a, b) => (a == null || b == null ? NaN : ((a - b) * 1000) / fps);
+    // 腿臂分离时差：髋开始伸展 → 肘开始伸出的间隔。正值 = 下肢先动、上肢后动（正确的自下而上发力链）
+    add("legArmDelay", "腿臂分离时差", gapMs(tElbow, tHip), "ms", 0, 9999, 1, {
+      verdictOverride: "info", screeningOnly: true,
+      rangeText: "正值 = 下肢领先上肢（趋势参考）",
+      frame: releaseIdx,
+    });
+    // 下肢发力顺序差：膝开始伸展 → 髋开始伸展的间隔。正值 = 膝先蹬，符合踝→膝→髋的自下而上顺序
+    add("legSeq", "下肢发力顺序差", gapMs(tHip, tKnee), "ms", 0, 9999, 1, {
+      verdictOverride: "info", screeningOnly: true,
+      rangeText: "正值 = 膝先于髋启动（趋势参考）",
+      frame: releaseIdx,
+    });
   }
 
   // 文献校准：移动投篮实测出手手高为身高的 112.8%–118.9%（跳投类）；下限 0.95 过松会放过贴肩出手

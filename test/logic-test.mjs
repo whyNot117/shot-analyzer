@@ -99,7 +99,7 @@ check("双球视频检出 2 次出手", twoDetect.cycles.length === 2, `n=${twoD
 const mergedTwo = mergeCycles(twoDetect.cycles.map((c) => computeMetrics(twoShotFrames, c, sideDetect.side, "jump", "side")));
 const singleReport = buildReport(computeMetrics(sideFrames, sideCycle, sideDetect.side, "jump", "side"), "jump");
 const mergedReport = buildReport(mergedTwo, "jump", 2);
-check("双球合并后 10 项侧面指标无缺失", mergedTwo.length === 10, `n=${mergedTwo.length}`);
+check("双球合并后 13 项侧面指标无缺失", mergedTwo.length === 13, `n=${mergedTwo.length}`);
 check("两次相同出手的合并评分与单次一致", mergedReport.score === singleReport.score,
   `${mergedReport.score} vs ${singleReport.score}`);
 check("合并报告标注出手次数", mergedReport.cycleCount === 2);
@@ -128,7 +128,7 @@ check("左右重心为趋势参考（info，不计分）",
 
 console.log("— METRIC_VIEWS 与实际产出一致 —");
 const allIds = new Set([...sideIds, ...frontIds]);
-check("13 项指标 id 全部对得上", Object.keys(METRIC_VIEWS).length === 13 &&
+check("16 项指标 id 全部对得上", Object.keys(METRIC_VIEWS).length === 16 &&
   Object.keys(METRIC_VIEWS).every((id) => allIds.has(id)),
   [...Object.keys(METRIC_VIEWS).filter((id) => !allIds.has(id))].join(","));
 
@@ -354,7 +354,7 @@ for (const id of Object.keys(METRIC_VIEWS)) {
   const src = cands[0];
   merged.push({ ...src.metrics.find((m) => m.id === id), src: src.label });
 }
-check("融合后 13 项无缺失", merged.length === 13 && missing.length === 0, `missing=${missing.join(",")}`);
+check("融合后 16 项无缺失", merged.length === 16 && missing.length === 0, `missing=${missing.join(",")}`);
 check("融合项带来源标签", merged.every((m) => m.src));
 
 console.log("— 报告引擎 —");
