@@ -12,8 +12,9 @@ import {
 } from "./history.js";
 import { lineChart } from "./charts.js";
 import { SCENE_LABEL } from "./scene.js";
+import { assessClipQuality, renderShotChecklist, qualityCardHTML } from "./quality.js";
 
-console.log("🏀 投篮姿态分析 · 代码版本 v5.7（2026-11-05）——评分异常时请先确认此版本并强制刷新（Ctrl+F5）");
+console.log("🏀 投篮姿态分析 · 代码版本 v5.8（2026-11-12）——评分异常时请先确认此版本并强制刷新（Ctrl+F5）");
 
 const $ = (id) => document.getElementById(id);
 const esc = escHtml;
@@ -36,6 +37,7 @@ let lastDetection = null; // 周期检测缓存：切换投篮类型直接复用
 let loopRunning = false;
 let mainView = "side";   // 主视频机位（side/front/oblique/unknown）
 let mainVis = 0;         // 主视频动作窗口内出手侧关键点平均可见度
+let quality = null;      // 素材质量判定缓存：同一段视频只判一次，切换投篮类型/场景不重判
 
 // PWA：注册 Service Worker，缓存应用与模型，二次访问离线可用
 if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
@@ -88,9 +90,12 @@ video.addEventListener("loadedmetadata", () => {
   lastCycle = null;
   lastCycles = [];
   lastDetection = null;
+  quality = null;        // 换视频后素材质量要重新判
   fusionRendered = false; // 融合报告基于主视频，一并清空
   $("fusion-report").innerHTML = "";
   $("fusion-gaps").innerHTML = "";
+  $("quality-card").innerHTML = "";
+  $("quality-card").classList.add("hidden");
   updateFusionUI();
   overlay.width = video.videoWidth;
   overlay.height = video.videoHeight;
@@ -125,6 +130,7 @@ async function analyze() {
   $("progress-wrap").classList.remove("hidden");
   setStatus("加载识别模型中…（首次约 5–10 MB，之后有缓存）");
   lastDetection = null; // 重扫的 frames 与旧缓存未必逐位一致（CPU/GPU 差异、间歇失败帧），周期索引必须重算
+  quality = null; // 重新扫描 = 新素材，质量要重新判（切换投篮类型/场景不会走到这里）
 
   let landmarker;
   try {
@@ -146,15 +152,20 @@ async function analyze() {
   }, (n) => setStatus(`⚠️ ${n}`));
 
   $("progress-fill").style.width = "100%";
+  chosenSide = pickSide(frames);
+  mainView = classifyView(frames);
   const detected = frames.filter((f) => f.landmarks).length;
   if (detected === 0) {
     setStatus("未识别到人像。请确认画面中有清晰的全身人像、光线充足，然后重新选择视频。");
+    // 一个关键点都没测到 → 素材质量必然不合格：让质量卡片接管"该怎么重拍"的说明，
+    // 但上面这句提示保留（它还负责解释"为什么会没认出人"）
+    quality = assessClipQuality(frames, chosenSide, { cycleCount: 0, peopleSeen: frames.peopleSeen ?? 1 });
+    renderQualityCard();
+    $("step-report").classList.remove("hidden");
     $("btn-analyze").disabled = false;
     updateFusionUI();
     return;
   }
-  chosenSide = pickSide(frames);
-  mainView = classifyView(frames);
   setStatus(`识别完成：${detected}/${frames.length} 帧检测到人像${frames.peopleSeen > 1 ? `（画面出现 ${frames.peopleSeen} 人，已锁定占画面最大的投篮者）` : ""}，机位：${VIEW_LABEL[mainView]}。${frames.failedFrames ? `⚠️ ${frames.failedFrames} 帧推理失败已插值。` : ""}报告已生成，也可点击播放查看骨架叠加。`);
   runReport();
   $("btn-analyze").disabled = false;
@@ -222,6 +233,31 @@ function runReport(archive = true) {
   const rejectNote = cycles.rejected
     ? `⚠️ 有 ${cycles.rejected} 次出手未计入（${cycles.rejectNote || "人物未完整出现在画面里"}）——这段动作无法可靠测量，报告只基于已计入的出手。`
     : "";
+  // 素材质量：扫描完成、拿到出手周期之后再判一次。同一段视频只判一次并缓存——
+  // 切换投篮类型/场景会重跑 runReport（不重扫），没必要反复重判，也不该反复弹同一张卡片
+  if (!quality) {
+    quality = assessClipQuality(frames, chosenSide, {
+      cycleCount: cycles.length,
+      peopleSeen: frames.peopleSeen ?? 1,
+    });
+  }
+  if (quality.level === "bad") {
+    // 素材不合格就不出评分报告：一份看起来很正式的评分会让用户把噪声当成结论
+    renderQualityCard();
+    body.innerHTML = cycle
+      ? '<p class="report-empty">这段素材的拍摄条件不足以给出可信读数，已暂停生成评分报告——按上面卡片里的建议重拍一段再试。</p>'
+      : '<p class="report-empty">未能检测到明显的出手动作（需要手腕高于肩部的瞬间）。请确认视频包含完整的投篮过程：持球 → 下蹲 → 出手 → 跟随。</p>'
+        + (validRatio < 0.3
+          ? '<p class="report-empty">⚠️ 画面中能识别到人的时间太短（不足全程的 30%），请让投篮者完整入镜。</p>'
+          : "")
+        + (frames.peopleSeen > 1
+          ? '<p class="report-empty">⚠️ 画面中有多人，可能锁定到了非投篮者——建议重拍：主人公占画面一半以上、其余人远离镜头或出画。</p>'
+          : "")
+        + (rejectNote ? `<p class="report-empty">${rejectNote}</p>` : "");
+    updateFusionUI();
+    return; // 不滚动过去：用户改投篮类型/场景时不该被这张卡片拽走
+  }
+  renderQualityCard();
   if (!cycle) {
     body.innerHTML =
       '<p class="report-empty">未能检测到明显的出手动作（需要手腕高于肩部的瞬间）。请确认视频包含完整的投篮过程：持球 → 下蹲 → 出手 → 跟随。</p>'
@@ -266,6 +302,14 @@ function runReport(archive = true) {
   renderGapCard(body);
   body.scrollIntoView({ behavior: "smooth", block: "start" });
   updateFusionUI();
+}
+
+// 素材质量卡片（放在报告区最上方）：坏 → 不出报告的醒目指引；警告 → 报告上方的黄色提醒；良好 → 一行轻量说明
+function renderQualityCard() {
+  const box = $("quality-card");
+  if (!box || !quality) return;
+  box.classList.remove("hidden");
+  box.innerHTML = qualityCardHTML(quality);
 }
 
 // 报告下方的「补拍建议」：机位盲区 + 识别质量提示 + 机位示意图
@@ -970,6 +1014,26 @@ function generateFusion(archive = false) {
 
 // 第 1 步拍摄建议里的机位示意图（无高亮，展示全部三个机位）
 $("guide-slot").innerHTML = courtGuideSVG();
+
+// 第 1 步的拍摄清单（可勾选，只当行动提示，不持久化、不参与任何判定）
+renderShotChecklist($("shot-checklist"));
+
+// 指标白话说明的展开/收起：点一下就地摊开，同一时刻只展开一行
+// （普通球友是截图发群的，所以不能用 hover 提示；展开状态不持久化，刷新即收起）
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".m-info");
+  if (!btn) return;
+  const item = btn.closest(".metric-item");
+  const panel = item?.querySelector(".metric-plain");
+  if (!panel) return;
+  const wasOpen = !panel.hidden;
+  document.querySelectorAll(".metric-plain").forEach((p) => { p.hidden = true; });
+  document.querySelectorAll(".m-info").forEach((b) => b.setAttribute("aria-expanded", "false"));
+  if (!wasOpen) {
+    panel.hidden = false;
+    btn.setAttribute("aria-expanded", "true");
+  }
+});
 
 // 训练档案区：进入页面先把已有档案渲染出来（空档案显示引导文案）
 renderHistory();

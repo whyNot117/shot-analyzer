@@ -1,6 +1,7 @@
 // 评分规则引擎与报告渲染：指标 → 评分/评级 → 针对性中文建议（不依赖任何外部服务）
 import { JUMP_MIN, TREND_ONLY } from "./metrics.js";
 import { lineChart } from "./charts.js";
+import { METRIC_PLAIN, UNIT_PLAIN } from "./glossary.js";
 
 export const TYPE_LABEL = { jump: "跳投", mid: "中投", free: "罚球", three: "三分" };
 
@@ -144,6 +145,22 @@ function formatDelta(delta) {
   return delta > 0 ? `+${s}` : s;
 }
 
+/**
+ * 单位与参考区间的白话说明。
+ * 数值本身的呈现格式一个字不动（避免影响现有测试与读数习惯），
+ * 只在展开说明里补一句"这个单位/区间是什么意思"。
+ */
+function plainUnitLine(m) {
+  const unitName = UNIT_PLAIN[m.unit];
+  const range = String(m.rangeText ?? "").trim();
+  const parts = [];
+  if (unitName) parts.push(`单位是${unitName}`);
+  // 区间型（"0–45°"）说人话是"正常范围"；文字型（"需起跳"）原样带出
+  if (/^\d/.test(range)) parts.push(`参考区间 ${range} 就是正常范围`);
+  else if (range) parts.push(`参考说明：${range}`);
+  return parts.length ? `${parts.join("；")}。` : "";
+}
+
 export function buildReport(metrics, type, cycleCount = 1) {
   // 自动识别：三分/中投/跳投的评分标准相同（都要求起跳），真正要区分的只有罚球（贴地）——
   // 起跳幅度本身就是测量值，按中位数直接判定即可
@@ -209,15 +226,30 @@ export function renderReport(el, report, opts = {}) {
     }</small>`;
   };
 
+  // 每个指标行后面挂一个可展开的白话说明：点一下就在这一行下面摊开，
+  // 不做 hover 提示——普通球友是截图发群的，悬停提示进了截图就不存在了
   const rows = report.metrics
-    .map(
-      (m) => `
-      <div class="metric-row ${m.verdict}">
-        <span class="m-name">${m.name}${m.src ? ` <i class="m-src">${m.src}</i>` : ""}</span>
-        <span class="m-value">${m.value}<small>参考 ${m.rangeText}</small>${trendTag(m)}</span>
-        <span class="m-icon">${vIcon[m.verdict]}</span>
-      </div>`
-    )
+    .map((m) => {
+      const plain = METRIC_PLAIN[m.id];
+      const infoBtn = plain
+        ? `<button type="button" class="m-info" aria-expanded="false" title="这一项在说什么？">ⓘ</button>`
+        : "";
+      const plainPanel = plain
+        ? `<div class="metric-plain" hidden>
+            <p class="mp-say">${escHtml(plain.say)}</p>
+            <p class="mp-why"><b>为什么值得看：</b>${escHtml(plain.why)}</p>
+            <p class="mp-unit">${escHtml(plainUnitLine(m))}</p>
+          </div>`
+        : "";
+      return `
+      <div class="metric-item" data-metric="${escHtml(m.id)}">
+        <div class="metric-row ${m.verdict}">
+          <span class="m-name">${m.name}${m.src ? ` <i class="m-src">${m.src}</i>` : ""}${infoBtn}</span>
+          <span class="m-value">${m.value}<small>参考 ${m.rangeText}</small>${trendTag(m)}</span>
+          <span class="m-icon">${vIcon[m.verdict]}</span>
+        </div>${plainPanel}
+      </div>`;
+    })
     .join("");
 
   const tips = report.tips
@@ -269,6 +301,17 @@ export function renderReport(el, report, opts = {}) {
     ? '<p class="experimental-warn">⚠️ 移动/接球场景判定为实验性功能，指标区间尚未用真实素材校准，结论仅供参考。</p>'
     : "";
 
+  // 术语表：只列本次报告里真实出现过的指标，方便想一次看完的人
+  const appeared = report.metrics.filter((m) => METRIC_PLAIN[m.id]);
+  const glossaryBox = appeared.length
+    ? `<details class="glossary-box">
+        <summary>📖 术语表（本次报告出现的 ${appeared.length} 项指标）</summary>
+        <ul class="glossary-list">${appeared
+          .map((m) => `<li><b>${escHtml(m.name)}</b> —— ${escHtml(METRIC_PLAIN[m.id].say)}</li>`)
+          .join("")}</ul>
+      </details>`
+    : "";
+
   el.innerHTML = `
     <div class="report-summary">
       <div class="score-ring" style="--p:${report.score}">
@@ -288,6 +331,7 @@ export function renderReport(el, report, opts = {}) {
       <h3>🔧 问题与原因（按重要性排序）</h3>
       ${tips || "<p>全部指标达标，保持当前动作！</p>"}
     </div>
+    ${glossaryBox}
     ${opts.note ? `<p class="report-warn">${opts.note}</p>` : ""}
     ${experimentalWarn}
     <p class="report-note">指标基于 2D 骨架估算，存在测量误差；投篮常有 20–45° 转体站位，会放大正面视角的肘外展/左右偏移读数。下蹲膝角、出手方向角、出手高度、躯干倾斜四项区间已按投篮科研实测数据校准，其余为文献常识启发值；各项均为动作形态筛查而非命中率预测；单机位视角盲区见「补拍建议」，多角度融合可补全。主报告、融合报告与不同机位/投篮类型的计分口径不同（计分指标与权重不同），分数不能跨报告、跨版本直接比较。请作为训练参考而非绝对标准。</p>
