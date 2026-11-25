@@ -70,11 +70,56 @@ const frontFrames = buildFrames([0, 40, 50, 65], widen(FRONT_POSES, 1.7));
 const obliqueFrames = buildFrames([0, 40, 50, 65], widen(FRONT_POSES, 1.05));
 
 console.log("— 机位判别（含宽高比校正）—");
-check("侧面视频判为 side（30° 转体站位，不校正会误判斜侧）", classifyView(sideFrames) === "side");
-check("正面视频判为 front（校正后比值≈0.24）", classifyView(frontFrames) === "front");
-check("斜侧视频判为 oblique（校正后比值≈0.15，不校正会误判 front）", classifyView(obliqueFrames) === "oblique");
-check("空视频判为 unknown", classifyView([]) === "unknown");
+// v5.9：classifyView 改成返回带依据的对象（{ view, ratio, sideShare, frontShare, unstable, reason }），
+// 断言跟着新 API 走；同时补上「机位不固定」的判定。
+const sideInfo = classifyView(sideFrames);
+const frontInfo = classifyView(frontFrames);
+const obliqueInfo = classifyView(obliqueFrames);
+const emptyInfo = classifyView([]);
+check("侧面视频判为 side（30° 转体站位，不校正会误判斜侧）", sideInfo.view === "side");
+check("正面视频判为 front（校正后比值≈0.24）", frontInfo.view === "front");
+check("斜侧视频判为 oblique（校正后比值≈0.15，不校正会误判 front）", obliqueInfo.view === "oblique");
+check("空视频判为 unknown", emptyInfo.view === "unknown");
+check("机位判定带依据（肩宽比中位数 + 中文说明）",
+  Math.abs(frontInfo.ratio - 0.256) < 0.01 && typeof frontInfo.reason === "string" && frontInfo.reason.length > 0);
+check("稳定的机位不算 unstable", frontInfo.unstable === false && sideInfo.unstable === false);
 check("coverageGaps(side) 指向正面", coverageGaps("side").length === 1 && coverageGaps("side")[0].view === "front");
+
+// 机位不固定（v5.9 改动 3）：合成可控比值的帧，分别构造「双峰」与「运镜」两种情形
+// mkViewFrame(t, ratio, scale)：造一帧肩宽比恰为 ratio 的姿态；scale 缩放整体体高（模拟运镜远近）
+const mkViewFrame = (t, ratio, scale = 1) => {
+  const torsoH = 0.4 * scale;
+  const bodyH = 0.55 * scale;
+  const shoulderY = 0.3;
+  const gap = (ratio * torsoH) / ASPECT;
+  const lm = Array.from({ length: 33 }, () => ({ x: 0.5, y: 0.5, visibility: 0.9 }));
+  const headY = shoulderY + torsoH - bodyH;
+  // 头部三个关键点都要给：体高按「头顶三点均值 → 踝两点均值」算，漏一个就会被默认值带偏
+  lm[0] = { x: 0.5, y: headY, visibility: 0.9 };
+  lm[7] = { x: 0.5, y: headY, visibility: 0.9 };
+  lm[8] = { x: 0.5, y: headY, visibility: 0.9 };
+  lm[11] = { x: 0.5 - gap / 2, y: shoulderY, visibility: 0.9 };
+  lm[12] = { x: 0.5 + gap / 2, y: shoulderY, visibility: 0.9 };
+  lm[27] = { x: 0.5, y: shoulderY + torsoH, visibility: 0.9 };
+  lm[28] = { x: 0.5, y: shoulderY + torsoH, visibility: 0.9 };
+  return { t, landmarks: lm, aspect: ASPECT };
+};
+const bimodalFrames = [
+  ...Array.from({ length: 50 }, (_, i) => mkViewFrame(i / FPS, 0.05)),
+  ...Array.from({ length: 50 }, (_, i) => mkViewFrame((50 + i) / FPS, 0.25)),
+];
+const zoomFrames = [
+  ...Array.from({ length: 10 }, (_, i) => mkViewFrame(i / FPS, 0.25, 0.15)),
+  ...Array.from({ length: 10 }, (_, i) => mkViewFrame((10 + i) / FPS, 0.25, 1)),
+];
+const bimodalInfo = classifyView(bimodalFrames);
+const zoomInfo = classifyView(zoomFrames);
+check("双峰（侧/正各占一半）判为机位不固定", bimodalInfo.unstable === true);
+check("双峰时按侧面近似处理（宁可少报）", bimodalInfo.view === "side");
+check("双峰时写明占比依据", /双峰/.test(bimodalInfo.reason) && bimodalInfo.sideShare > 0.2 && bimodalInfo.frontShare > 0.2);
+check("运镜（体高 p90/p10 > 3）判为机位不固定", zoomInfo.unstable === true);
+check("运镜时写明运镜幅度依据", /运镜/.test(zoomInfo.reason) && zoomInfo.zoomRatio > 3);
+check("手动指定机位时跳过 unstable 判定", classifyView(bimodalFrames, { manual: true }).unstable === false);
 
 console.log("— 选边 —");
 check("侧面自动选可见侧", pickSide(sideFrames) === "right");

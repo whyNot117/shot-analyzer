@@ -15,6 +15,7 @@
 // 视频素材不入库：这里只接受文件名参数，仓库里不含任何用户视频。
 
 import { spawn } from "node:child_process";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -25,10 +26,26 @@ if (!VIDEO) {
   process.exit(1);
 }
 const SITE = (process.argv[3] || "http://127.0.0.1:5500/").replace(/\/?$/, "/");
-const PORT = Number(process.env.SHOT_CDP_PORT || 9333);
 const EDGE = process.env.SHOT_EDGE || "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe";
-// 浏览器配置目录放系统临时目录，不写死在某台机器的路径上
-const PROFILE = process.env.SHOT_PROFILE || join(tmpdir(), "shot-e2e-profile");
+// 浏览器配置目录放系统临时目录，不写死在某台机器的路径上。
+// 带上进程号：上一次跑崩了留下的 Edge 还占着同名目录时，新实例会复用旧浏览器
+// （页面停在旧标签上，看起来就像「元素不存在」）。每次用独立目录可以避免这个坑。
+const PROFILE = process.env.SHOT_PROFILE || join(tmpdir(), `shot-e2e-profile-${process.pid}`);
+
+// 调试端口也得挑一个空的：上一次遗留的 Edge 还占着 9333 时，
+// 连上去的是旧实例，页面根本不是这次要的站点
+const PORT = await (async () => {
+  if (process.env.SHOT_CDP_PORT) return Number(process.env.SHOT_CDP_PORT);
+  for (let p = 9333; p < 9440; p++) {
+    const ok = await new Promise((res) => {
+      const srv = createServer();
+      srv.once("error", () => res(false));
+      srv.listen(p, "127.0.0.1", () => srv.close(() => res(true)));
+    });
+    if (ok) return p;
+  }
+  throw new Error("9333–9439 之间没有空闲端口");
+})();
 
 const proc = spawn(
   EDGE,
@@ -37,11 +54,15 @@ const proc = spawn(
     `--remote-debugging-port=${PORT}`,
     `--user-data-dir=${PROFILE}`,
     "--autoplay-policy=no-user-gesture-required",
+    "--no-first-run",
+    "--no-default-browser-check",
     "--window-size=900,1400",
     SITE,
   ],
   { stdio: "ignore" }
 );
+let edgeExit = null;
+proc.on("exit", (code) => { edgeExit = code; });
 
 async function cdpTarget() {
   for (let i = 0; i < 40; i++) {
@@ -54,7 +75,11 @@ async function cdpTarget() {
     }
     await sleep(500);
   }
-  throw new Error("Edge CDP 没起来（检查 Edge 是否安装在 SHOT_EDGE 指定的路径）");
+  throw new Error(
+    `Edge CDP 没起来（检查 Edge 是否安装在 SHOT_EDGE 指定的路径）。\n` +
+    `  EDGE=${EDGE}\n  PORT=${PORT}\n  PROFILE=${PROFILE}\n` +
+    `  Edge 进程退出码：${edgeExit === null ? "仍在运行（但没开调试端口）" : edgeExit}`
+  );
 }
 
 const target = await cdpTarget();
@@ -98,7 +123,20 @@ const evaluate = async (expr) => {
   return r.result?.result?.value;
 };
 
-await sleep(1500);
+// 等页面真的把应用挂上来（模块脚本 + MediaPipe 模型加载要一会儿）：
+// 只 sleep 一段固定时间的话，页面还没渲染完就会报「元素不存在」
+let appReady = false;
+for (let i = 0; i < 60; i++) {
+  await sleep(1000);
+  const has = await evaluate(`!!document.getElementById('video-input')`).catch(() => false);
+  if (has) { appReady = true; break; }
+}
+if (!appReady) {
+  console.error(`页面没就绪：${SITE} 上找不到 #video-input`);
+  ws.close();
+  proc.kill();
+  process.exit(1);
+}
 
 // 注入视频：从站点取，素材不经过本地文件协议
 await evaluate(`(async () => {
@@ -140,7 +178,15 @@ if (!ready) {
     }));
     const summary = document.querySelector('#report-body .summary-text')?.textContent.replace(/\s+/g, ' ').trim();
     const tips = [...document.querySelectorAll('#report-body .tip-card')].map((t) => t.textContent.replace(/\s+/g, ' ').trim());
-    return JSON.stringify({ rows, summary, tips }, null, 1);
+    // v5.9：顶部摘要行、「读数只能作参考」块、分数环在不在——验收标准 B3/B4 就看这几项
+    const summaryLine = document.querySelector('#report-body .summary-line')?.textContent.replace(/\\s+/g, ' ').trim() ?? null;
+    const noScore = document.querySelector('#report-body .report-noscore')?.textContent.replace(/\\s+/g, ' ').trim() ?? null;
+    const scoreRing = document.querySelector('#report-body .score-ring');
+    const score = scoreRing
+      ? { score: scoreRing.querySelector('.score-inner b')?.textContent.trim(), grade: scoreRing.querySelector('.score-inner small')?.textContent.trim() }
+      : null;
+    const quality = document.querySelector('#report-body .report-quality')?.textContent.replace(/\\s+/g, ' ').trim() ?? null;
+    return JSON.stringify({ summaryLine, noScore, score, quality, rows, summary, tips }, null, 1);
   })()`);
   console.log("\n=== 报告 ===");
   console.log(out);

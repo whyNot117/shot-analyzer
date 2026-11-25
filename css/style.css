@@ -95,6 +95,41 @@ footer { color: var(--muted); font-size: 0.8rem; text-align: center; padding: 24
 }
 
 /* 姿态报告 */
+/* v5.9：报告顶部的摘要块——一行摘要 + 「读数只能作参考」+ 素材质量提醒，
+   三件事在同一个块里说，不在页面上下两处各说一遍互相打架的话 */
+.report-head { margin-bottom: 14px; }
+.summary-line {
+  margin: 0 0 8px; padding: 9px 12px; border-radius: 10px;
+  background: rgba(56, 189, 248, 0.08); border: 1px solid rgba(56, 189, 248, 0.25);
+  font-size: 0.86rem; color: var(--text); line-height: 1.6;
+}
+.report-noscore {
+  padding: 10px 12px; border-radius: 10px; margin-bottom: 8px;
+  background: rgba(250, 204, 21, 0.1); border: 1px solid rgba(250, 204, 21, 0.4);
+  font-size: 0.88rem;
+}
+.report-noscore b { color: #facc15; }
+.report-noscore ul { margin: 6px 0 0; padding-left: 20px; color: var(--muted); }
+.report-noscore li { margin: 2px 0; }
+.report-quality {
+  padding: 9px 12px; border-radius: 10px; font-size: 0.85rem; margin: 0 0 8px;
+  border: 1px solid var(--line);
+}
+.report-quality.warn { background: rgba(250, 204, 21, 0.08); border-color: rgba(250, 204, 21, 0.35); }
+.report-quality.warn ul { margin: 6px 0 0; padding-left: 20px; color: var(--muted); }
+.report-quality.ok { background: rgba(74, 222, 128, 0.07); border-color: rgba(74, 222, 128, 0.25); }
+.score-none {
+  width: 88px; height: 88px; border-radius: 50%; flex: none;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: rgba(148, 163, 184, 0.12); border: 1px dashed var(--line);
+}
+.score-none b { font-size: 1.5rem; color: var(--muted); }
+.score-none small { color: var(--muted); font-size: 0.72rem; }
+.m-approx {
+  display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 6px;
+  background: rgba(250, 204, 21, 0.16); color: #facc15;
+  font-size: 0.72rem; font-style: normal; font-weight: 400;
+}
 .report-summary { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
 .score-ring {
   --p: 0;

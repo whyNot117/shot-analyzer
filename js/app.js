@@ -2,10 +2,14 @@
 import { getLandmarker, resetLandmarker, nextTimestamp, beginScan } from "./pose.js";
 import { drawFrame, pickSide, pickShootingSide, SIDE } from "./draw.js";
 import { detectShotCycles, mergeCycles, computeMetrics, cycleCurves, standingBodyHeight, METRIC_NAMES, METRIC_VIEWS, LOWER_IS_BETTER, NEUTRAL_DIRECTION } from "./metrics.js";
-import { buildReport, renderReport, TYPE_LABEL, setProfile, escHtml } from "./report.js";
+import {
+  buildReport, renderReport, TYPE_LABEL, setProfile, escHtml, noScoreReasons,
+  subjectLabelText, subjectShotDesc, summaryLineText, statusLineText,
+} from "./report.js";
 import { classifyView, VIEW_LABEL, coverageGaps, windowVisibility, courtGuideSVG } from "./views.js";
 import { normalizeSequence, dtwAlign, jointDeviations, JOINT_LABEL, JOINT_ADVICE } from "./compare.js";
-import { isHevcFile, makePersonPicker } from "./media.js";
+import { isHevcFile } from "./media.js";
+import { buildTracks, applySubject, poseBodyHeight, videoLevelFrames } from "./tracks.js";
 import {
   listRecords, addRecord, removeRecord, clearRecords,
   exportText, importText, metricSeries, compareMetric, summarize, makeRecord,
@@ -14,7 +18,7 @@ import { lineChart } from "./charts.js";
 import { SCENE_LABEL } from "./scene.js";
 import { assessClipQuality, renderShotChecklist, qualityCardHTML } from "./quality.js";
 
-console.log("🏀 投篮姿态分析 · 代码版本 v5.8（2026-11-12）——评分异常时请先确认此版本并强制刷新（Ctrl+F5）");
+console.log("🏀 投篮姿态分析 · 代码版本 v5.9（2026-11-26）——评分异常时请先确认此版本并强制刷新（Ctrl+F5）");
 
 const $ = (id) => document.getElementById(id);
 const esc = escHtml;
@@ -29,6 +33,7 @@ const SAMPLE_FPS = 30;   // 扫描采样率
 const MAX_SECONDS = 30;  // 超长视频只分析前 30 秒
 
 let frames = [];         // [{ t, landmarks }]
+let scanFrames = [];     // [{ t, poses, aspect }]：扫描原始结果（每帧全部候选姿态）
 let scanSpan = 0;        // 实际扫描时长
 let chosenSide = "right";
 let lastCycle = null;    // 主周期：骨架叠加与对比功能用
@@ -36,6 +41,9 @@ let lastCycles = [];     // 全部检测到的出手周期（报告逐指标取�
 let lastDetection = null; // 周期检测缓存：切换投篮类型直接复用，避免选臂回写改变下次检测
 let loopRunning = false;
 let mainView = "side";   // 主视频机位（side/front/oblique/unknown）
+let mainViewInfo = null; // 机位判定的依据（肩宽比中位、双峰占比、运镜幅度、是否不固定）
+let subjectInfo = null;  // 主体选取结果（哪条轨迹、为什么是它、出手事件在哪几秒）
+let frameStats = null;   // 帧的账：检出/无效/有效/计入主体/未计入
 let mainVis = 0;         // 主视频动作窗口内出手侧关键点平均可见度
 let quality = null;      // 素材质量判定缓存：同一段视频只判一次，切换投篮类型/场景不重判
 
@@ -94,8 +102,6 @@ video.addEventListener("loadedmetadata", () => {
   fusionRendered = false; // 融合报告基于主视频，一并清空
   $("fusion-report").innerHTML = "";
   $("fusion-gaps").innerHTML = "";
-  $("quality-card").innerHTML = "";
-  $("quality-card").classList.add("hidden");
   updateFusionUI();
   overlay.width = video.videoWidth;
   overlay.height = video.videoHeight;
@@ -145,28 +151,51 @@ async function analyze() {
   scanSpan = Math.min(video.duration || 0, MAX_SECONDS);
   const note = video.duration > MAX_SECONDS ? `（视频较长，仅分析前 ${MAX_SECONDS} 秒）` : "";
 
-  frames = await scanInto(video, landmarker, (p) => {
+  const scan = await scanInto(video, landmarker, (p) => {
     const pct = Math.round(p * 100);
     setStatus(`识别中… ${pct}%${note}`);
     $("progress-fill").style.width = `${pct}%`;
   }, (n) => setStatus(`⚠️ ${n}`));
 
   $("progress-fill").style.width = "100%";
+  // 主体选取：扫描阶段保留每帧的全部候选姿态，扫完再聚成轨迹、按出手动作证据选主体。
+  // 不再「逐帧取占画面最大的人」——手持跟拍时人在画面里忽远忽近，那个锁法会把不同的人混进同一份报告。
+  const applied = applySubject(scan, buildTracks(scan));
+  frames = applied.frames;
+  scanFrames = scan;
+  subjectInfo = applied.subject;
+  frameStats = applied.stats;
+  frames.peopleSeen = scan.peopleSeen;
+  frames.failedFrames = scan.failedFrames;
   chosenSide = pickSide(frames);
-  mainView = classifyView(frames);
+  mainViewInfo = classifyView(frames);
+  mainView = mainViewInfo.view;
   const detected = frames.filter((f) => f.landmarks).length;
   if (detected === 0) {
     setStatus("未识别到人像。请确认画面中有清晰的全身人像、光线充足，然后重新选择视频。");
     // 一个关键点都没测到 → 素材质量必然不合格：让质量卡片接管"该怎么重拍"的说明，
     // 但上面这句提示保留（它还负责解释"为什么会没认出人"）
-    quality = assessClipQuality(frames, chosenSide, { cycleCount: 0, peopleSeen: frames.peopleSeen ?? 1 });
-    renderQualityCard();
+    quality = retargetQualitySubject(
+      assessClipQuality(videoLevelFrames(scan), chosenSide, { cycleCount: 0, peopleSeen: frames.peopleSeen ?? 1 })
+    );
+    $("report-body").innerHTML = qualityCardHTML(quality);
     $("step-report").classList.remove("hidden");
     $("btn-analyze").disabled = false;
     updateFusionUI();
     return;
   }
-  setStatus(`识别完成：${detected}/${frames.length} 帧检测到人像${frames.peopleSeen > 1 ? `（画面出现 ${frames.peopleSeen} 人，已锁定占画面最大的投篮者）` : ""}，机位：${VIEW_LABEL[mainView]}。${frames.failedFrames ? `⚠️ ${frames.failedFrames} 帧推理失败已插值。` : ""}报告已生成，也可点击播放查看骨架叠加。`);
+  setStatus(statusLineText({
+    subjectFrames: detected,
+    totalFrames: frames.length,
+    detectedFrames: frameStats.detected,
+    invalidFrames: frameStats.invalid,
+    otherFrames: frameStats.otherFrames,
+    peopleSeen: frames.peopleSeen ?? 1,
+    subject: subjectInfo,
+    view: mainView,
+    viewInfo: mainViewInfo,
+    failedFrames: frames.failedFrames ?? 0,
+  }));
   runReport();
   $("btn-analyze").disabled = false;
   $("btn-analyze").textContent = "🔄 重新分析";
@@ -210,6 +239,22 @@ $("btn-play").addEventListener("click", () => {
 // ---------- 4. 姿态报告 ----------
 // archive=true 时把本次结果存进训练档案（重新分析同一段视频也算一次真实数据）；
 // 切换投篮类型只是重新评分，不该在档案里堆重复记录
+// v5.9：quality.js 里「已经锁定占画面最大的那个」是旧逻辑的说法——
+// v5.9 主体是按出手动作证据选的。这里按新口径重写这一条，
+// 免得质量提醒卡片和顶部摘要（主体是谁）两处说法互相打架。
+function retargetQualitySubject(q) {
+  if (!q || !Array.isArray(q.issues)) return q;
+  const item = q.issues.find((i) => i.id === "multiplePeople");
+  if (!item) return q;
+  const n = q.stats?.peopleSeen ?? 2;
+  const desc = subjectShotDesc(subjectInfo);
+  item.text = desc
+    ? `本次分析的是有出手动作的那个（${desc}）；如果那不是你，这段结果就不能用。`
+    : "没有检测到完整的投篮动作，读数仅供参考。";
+  item.fix = "确认被分析的是你本人；不是本人的话，请换一段只有你一个人的视频。";
+  return q;
+}
+
 function runReport(archive = true) {
   const type = $("shot-type").value;
   const sceneHint = $("shot-scene").value; // auto = 自动识别，也可手动指定场景
@@ -236,36 +281,43 @@ function runReport(archive = true) {
   // 素材质量：扫描完成、拿到出手周期之后再判一次。同一段视频只判一次并缓存——
   // 切换投篮类型/场景会重跑 runReport（不重扫），没必要反复重判，也不该反复弹同一张卡片
   if (!quality) {
-    quality = assessClipQuality(frames, chosenSide, {
-      cycleCount: cycles.length,
-      peopleSeen: frames.peopleSeen ?? 1,
-    });
+    // 质量问的是「这段素材本身好不好」，所以用视频级帧（每帧取任意一个可信的人），
+    // 不用「锁定的那个人」的帧——那是主体选取的结果，不是素材的属性
+    quality = retargetQualitySubject(
+      assessClipQuality(videoLevelFrames(scanFrames), chosenSide, {
+        cycleCount: cycles.length,
+        peopleSeen: frames.peopleSeen ?? 1,
+      })
+    );
   }
   if (quality.level === "bad") {
     // 素材不合格就不出评分报告：一份看起来很正式的评分会让用户把噪声当成结论
-    renderQualityCard();
-    body.innerHTML = cycle
-      ? '<p class="report-empty">这段素材的拍摄条件不足以给出可信读数，已暂停生成评分报告——按上面卡片里的建议重拍一段再试。</p>'
-      : '<p class="report-empty">未能检测到明显的出手动作（需要手腕高于肩部的瞬间）。请确认视频包含完整的投篮过程：持球 → 下蹲 → 出手 → 跟随。</p>'
+    // 素材质量卡片直接放进报告区顶部：摘要、质量、结论在同一个块里说，不在页面上下两处各说一遍
+    body.innerHTML = qualityCardHTML(quality)
+      + (cycle
+        ? '<p class="report-empty">这段素材的拍摄条件不足以给出可信读数，已暂停生成评分报告——按上面卡片里的建议重拍一段再试。</p>'
+        : '<p class="report-empty">未能检测到明显的出手动作（需要手腕高于肩部的瞬间）。请确认视频包含完整的投篮过程：持球 → 下蹲 → 出手 → 跟随。</p>')
         + (validRatio < 0.3
           ? '<p class="report-empty">⚠️ 画面中能识别到人的时间太短（不足全程的 30%），请让投篮者完整入镜。</p>'
           : "")
         + (frames.peopleSeen > 1
-          ? '<p class="report-empty">⚠️ 画面中有多人，可能锁定到了非投篮者——建议重拍：主人公占画面一半以上、其余人远离镜头或出画。</p>'
+          ? `<p class="report-empty">⚠️ 画面中有多人，本次分析的是${esc(subjectLabelText(subjectInfo))}——如果那不是你，这段结果就不能用。</p>`
           : "")
         + (rejectNote ? `<p class="report-empty">${rejectNote}</p>` : "");
     updateFusionUI();
     return; // 不滚动过去：用户改投篮类型/场景时不该被这张卡片拽走
   }
-  renderQualityCard();
   if (!cycle) {
+    // 没有出手动作 → 读数只能作参考（同一条出口，不出分数）
     body.innerHTML =
-      '<p class="report-empty">未能检测到明显的出手动作（需要手腕高于肩部的瞬间）。请确认视频包含完整的投篮过程：持球 → 下蹲 → 出手 → 跟随。</p>'
+      `<div class="report-head"><p class="summary-line">${esc(summaryLineText(summaryArgs(0)))}</p>` +
+      `<div class="report-noscore"><b>⚠️ 这次读数只能作参考</b><ul><li>没有检测到完整的投篮动作（需要手腕高于肩部的瞬间），读数仅供参考</li></ul></div></div>`
+      + '<p class="report-empty">未能检测到明显的出手动作（需要手腕高于肩部的瞬间）。请确认视频包含完整的投篮过程：持球 → 下蹲 → 出手 → 跟随。</p>'
       + (validRatio < 0.3
         ? '<p class="report-empty">⚠️ 画面中能识别到人的时间太短（不足全程的 30%），请让投篮者完整入镜。</p>'
         : "")
       + (frames.peopleSeen > 1
-        ? '<p class="report-empty">⚠️ 画面中有多人，可能锁定到了非投篮者——建议重拍：主人公占画面一半以上、其余人远离镜头或出画。</p>'
+        ? `<p class="report-empty">⚠️ 画面中有多人，本次分析的是${esc(subjectLabelText(subjectInfo))}——如果那不是你，这段结果就不能用。</p>`
         : "")
       + (rejectNote ? `<p class="report-empty">${rejectNote}</p>` : "");
     updateFusionUI();
@@ -276,7 +328,18 @@ function runReport(archive = true) {
   mainVis = windowVisibility(frames, Object.values(SIDE[chosenSide]), cycle.crouchIdx, cycle.apexIdx);
   // 多次出手逐次计算后取中位数：比单次出手更接近真实水平，也消除「两次分析选中不同出手」的评分漂移
   const metrics = mergeCycles(cycles.map((c) => computeMetrics(frames, c, chosenSide, type, mainView, SAMPLE_FPS)));
-  const report = buildReport(metrics, type, cycles.length);
+  // 读数可信度：满足任一条就不出分数与等级（v5.9 改动 4）
+  const noScoreReasonsList = noScoreReasons({
+    unstable: !!mainViewInfo?.unstable,
+    unstableReasons: mainViewInfo?.reasons ?? [],
+    peopleSeen: frames.peopleSeen ?? 1,
+    hasShot: (subjectInfo?.track?.stats?.shotEvents ?? 0) > 0,
+    subjectFrames: frameStats?.subjectFrames ?? 0,
+    totalFrames: frames.length,
+    droppedFrames: (frameStats?.otherFrames ?? 0) + (frameStats?.invalid ?? 0),
+    qualityLevel: quality?.level ?? null,
+  });
+  const report = buildReport(metrics, type, cycles.length, { noScoreReasons: noScoreReasonsList });
   // 存档 + 「较上次」对比（对比基准是存档前的历史，所以先取历史再写入当前记录）
   const cmp = saveToArchive(report, metrics, "主视频", mainView, archive);
   // 关键动作曲线：用第一个（代表性）出手画肘角/膝角走势
@@ -296,6 +359,8 @@ function runReport(archive = true) {
     curves,
     curveNote: mainView === "front" ? "正面机位读数为投影角，参考意义有限。" : "",
     scene: sceneInfo,
+    summaryLine: summaryLineText(summaryArgs(metrics.length)),
+    quality,
     // 移动/接球场景是实验性功能，结论要打上醒目提示
     experimental: sceneId === "moving" || sceneId === "catch",
   });
@@ -304,12 +369,19 @@ function runReport(archive = true) {
   updateFusionUI();
 }
 
-// 素材质量卡片（放在报告区最上方）：坏 → 不出报告的醒目指引；警告 → 报告上方的黄色提醒；良好 → 一行轻量说明
-function renderQualityCard() {
-  const box = $("quality-card");
-  if (!box || !quality) return;
-  box.classList.remove("hidden");
-  box.innerHTML = qualityCardHTML(quality);
+// 摘要行的参数：把运行态（机位判定、主体选取、帧的账）交给 report.js 的纯函数拼成那一行
+function summaryArgs(metricCount) {
+  return {
+    metricCount,
+    metricTotal: Object.keys(METRIC_VIEWS).length,
+    view: mainView,
+    viewInfo: mainViewInfo,
+    subject: subjectInfo,
+    subjectFrames: frameStats?.subjectFrames ?? frames.filter((f) => f.landmarks).length,
+    totalFrames: frames.length || 1,
+    detectedFrames: frameStats?.detected ?? 0,
+    invalidFrames: frameStats?.invalid ?? 0,
+  };
 }
 
 // 报告下方的「补拍建议」：机位盲区 + 识别质量提示 + 机位示意图
@@ -773,21 +845,26 @@ async function scanIntoInner(el, landmarker, onProgress, onNote) {
   const aspect = el.videoWidth / el.videoHeight || 1; // 归一化坐标 x 乘此值才是真实几何
   let failStreak = 0; // 连续推理失败计数（GPU 上下文丢失时重建模型）
   let failedFrames = 0; // 最终失败的帧数（已插值；在状态栏披露，避免无声拉低评分）
-  const picker = makePersonPicker(); // 多人同框时锁定主人公（实现与门控见 media.js；每次扫描独立状态）
+  // v5.9：扫描阶段保留每帧的全部候选姿态，不再在这里挑人。
+  // 「挑人」这件事挪到扫描之后统一做（js/tracks.js 的轨迹聚类 + 出手证据），
+  // 因为逐帧挑「占画面最大的人」在手持跟拍里会挑到不同的人（画面里忽远忽近）。
+  let peopleSeen = 1;
+  const normalizePoses = (list) =>
+    (list ?? []).filter((lm) => Array.isArray(lm) && lm.length >= 29);
   for (let t = 0; t < span; t += dt) {
     await seekOn(el, t);
     inferCtx.drawImage(el, 0, 0, inferCanvas.width, inferCanvas.height);
-    let landmarks = null;
+    let poses = [];
     try {
       const res = landmarker.detectForVideo(inferCanvas, nextTimestamp());
-      landmarks = picker.pick(res.landmarks);
+      poses = normalizePoses(res.landmarks);
       failStreak = 0;
     } catch {
       // 个别帧失败重试一次；连续多帧失败视为 GPU 上下文丢失，重建模型（改用 CPU）继续
       failStreak++;
       try {
         const res = landmarker.detectForVideo(inferCanvas, nextTimestamp());
-        landmarks = picker.pick(res.landmarks);
+        poses = normalizePoses(res.landmarks);
         failStreak = 0;
       } catch { failedFrames++; /* 放弃该帧 */ }
       if (failStreak >= 5) {
@@ -796,7 +873,10 @@ async function scanIntoInner(el, landmarker, onProgress, onNote) {
         failStreak = 0;
       }
     }
-    out.push({ t, landmarks, aspect });
+    // 多人提示只统计「像真人」的姿态（占画面高度 ≥15%），避免幽灵/误检把单人视频报成多人
+    const credible = poses.filter((lm) => (poseBodyHeight(lm) ?? 0) >= 0.15).length;
+    if (credible > peopleSeen) peopleSeen = credible;
+    out.push({ t, poses, aspect });
     if (out.length % 5 === 0) {
       onProgress?.(span ? t / span : 1);
       await nextTick(); // 让出主线程，避免页面卡死
@@ -805,7 +885,7 @@ async function scanIntoInner(el, landmarker, onProgress, onNote) {
   inferCanvas.width = prevW;
   inferCanvas.height = prevH;
   out.failedFrames = failedFrames; // 挂在返回值上，由调用方决定是否披露
-  out.peopleSeen = picker.peopleSeen; // >1 时提示「已锁定占画面最大的投篮者」
+  out.peopleSeen = peopleSeen; // >1 时提示「画面里有 N 个人，本次分析的是谁」
   return out;
 }
 
@@ -857,6 +937,8 @@ let fusionRendered = false;
     const slot = fusionSlots[n - 1];
     if (!slot) return;
     slot.view = e.target.value;
+    // 手动指定机位 = 用户自己确认过了，跳过「机位不固定」的判定
+    slot.viewInfo = { ...(slot.viewInfo ?? {}), view: slot.view, unstable: false, manual: true };
     if (slot.view === "front" || slot.view === "oblique") {
       slot.side = pickShootingSide(slot.frames, slot.cycle, slot.side);
     } else {
@@ -903,15 +985,21 @@ async function analyzeFusionSlot(i, file) {
   const fr = await scanInto(v, landmarker, (p) => {
     st.textContent = `识别中… ${Math.round(p * 100)}%`;
   }, (n) => { st.textContent = `⚠️ ${n}`; });
-  if (!fr.some((f) => f.landmarks)) {
+  // 补拍视频同样先聚轨迹再选主体（与主视频同一套口径）
+  const applied = applySubject(fr, buildTracks(fr));
+  const slotFrames = applied.frames;
+  slotFrames.peopleSeen = fr.peopleSeen;
+  slotFrames.failedFrames = fr.failedFrames;
+  if (!slotFrames.some((f) => f.landmarks)) {
     st.textContent = "❌ 未识别到人像，请换更清晰的视频。";
     fusionSlots[i] = null;
     updateFusionUI();
     return;
   }
 
-  let view = classifyView(fr);
-  const detect = detectShotCycles(fr, pickSide(fr), SAMPLE_FPS);
+  const viewInfo = classifyView(slotFrames);
+  let view = viewInfo.view;
+  const detect = detectShotCycles(slotFrames, pickSide(slotFrames), SAMPLE_FPS);
   let side = detect.side;
   const cycles = detect.cycles;
   const cycle = cycles[0] ?? null;
@@ -926,12 +1014,12 @@ async function analyzeFusionSlot(i, file) {
     view = "side";
     note = "（机位未能自动判别，已按侧面处理，可手动指定）";
   }
-  if (view === "front" || view === "oblique") side = pickShootingSide(fr, cycles, side);
-  const vis = windowVisibility(fr, Object.values(SIDE[side]), cycle.crouchIdx, cycle.apexIdx);
-  fusionSlots[i] = { label: `补拍${n}`, frames: fr, cycles, cycle, side, view, vis };
+  if (view === "front" || view === "oblique") side = pickShootingSide(slotFrames, cycles, side);
+  const vis = windowVisibility(slotFrames, Object.values(SIDE[side]), cycle.crouchIdx, cycle.apexIdx);
+  fusionSlots[i] = { label: `补拍${n}`, frames: slotFrames, cycles, cycle, side, view, vis, viewInfo };
   $(`fusion-view-${n}`).classList.remove("hidden");
   $(`fusion-view-${n}`).value = view;
-  st.innerHTML = `✅ ${VIEW_LABEL[view]}机位 · 检测到 ${cycles.length} 次出手${cycles.rejected ? ` · ⚠️ ${cycles.rejected} 次未计入（人物不在画面）` : ""}${fr.failedFrames ? ` · ⚠️ ${fr.failedFrames} 帧识别失败` : ""}${note}`;
+  st.innerHTML = `✅ ${VIEW_LABEL[view]}机位${viewInfo.unstable ? "（机位不固定，按侧面近似）" : ""} · 检测到 ${cycles.length} 次出手${cycles.rejected ? ` · ⚠️ ${cycles.rejected} 次未计入（人物不在画面）` : ""}${fr.failedFrames ? ` · ⚠️ ${fr.failedFrames} 帧识别失败` : ""}${note}`;
   if (fusionRendered) generateFusion(true); // 已有融合报告时自动按新视频重算
   updateFusionUI();
 }

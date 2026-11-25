@@ -994,6 +994,16 @@ export function computeMetrics(frames, cycle, sideName, type = "jump", view = "s
 
   // 按固定顺序输出，单机位报告与融合报告的展示顺序一致
   const order = Object.keys(METRIC_VIEWS);
+  // v5.9 改动 5：斜侧机位（肩宽比中位落在 0.12–0.17）下，正面专属指标的透视畸变会让读数偏大——
+  // 标注出来，别让用户把它当成「需重点纠正」的结论（报告层把这类项从「bad」降级为「warn」）。
+  if (view === "oblique") {
+    const FRONT_ONLY = new Set(
+      Object.keys(METRIC_VIEWS).filter((id) => METRIC_VIEWS[id].length === 1 && METRIC_VIEWS[id][0] === "front")
+    );
+    for (const m of M) {
+      if (FRONT_ONLY.has(m.id)) m.approxNote = "斜侧近似，读数会偏大";
+    }
+  }
   M.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
   return M;
 }

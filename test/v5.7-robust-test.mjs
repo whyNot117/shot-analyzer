@@ -235,7 +235,7 @@ console.log("— 缺陷二：关键点单帧跳变过滤 —");
 console.log("— 缺陷三：离线壳与缓存策略 —");
 {
   const sw = readFileSync(join(ROOT, "sw.js"), "utf8");
-  check("缓存名升到 v5.8", sw.includes('"shot-analyzer-v5.8"'), sw.match(/shot-analyzer-v[\d.]+/)?.[0]);
+  check("缓存名升到 v5.9", sw.includes('"shot-analyzer-v5.9"'), sw.match(/shot-analyzer-v[\d.]+/)?.[0]);
   check("不再残留 v5.4 缓存名", !sw.includes("shot-analyzer-v5.4"));
   const jsFiles = readdirSync(join(ROOT, "js")).filter((f) => f.endsWith(".js"));
   const missing = jsFiles.filter((f) => !sw.includes(`./js/${f}`));
@@ -250,8 +250,8 @@ console.log("— 缺陷四：版本号 —");
 {
   const html = readFileSync(join(ROOT, "index.html"), "utf8");
   const app = readFileSync(join(ROOT, "js/app.js"), "utf8");
-  check("index.html 徽章是 v5.8", /·\s*v5\.8/.test(html), html.match(/·\s*v[\d.]+/)?.[0]);
-  check("app.js 横幅是 v5.8", /代码版本 v5\.8/.test(app), app.match(/代码版本 v[\d.]+/)?.[0]);
+  check("index.html 徽章是 v5.9", /·\s*v5\.9/.test(html), html.match(/·\s*v[\d.]+/)?.[0]);
+  check("app.js 横幅是 v5.9", /代码版本 v5\.9/.test(app), app.match(/代码版本 v[\d.]+/)?.[0]);
   check("两处都不再残留旧版本号", !/v5\.5|v5\.7/.test(html) && !/v5\.5|v5\.7/.test(app));
 }
 

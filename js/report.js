@@ -2,6 +2,8 @@
 import { JUMP_MIN, TREND_ONLY } from "./metrics.js";
 import { lineChart } from "./charts.js";
 import { METRIC_PLAIN, UNIT_PLAIN } from "./glossary.js";
+import { describePosition } from "./tracks.js";
+import { VIEW_LABEL } from "./views.js";
 
 export const TYPE_LABEL = { jump: "跳投", mid: "中投", free: "罚球", three: "三分" };
 
@@ -161,7 +163,136 @@ function plainUnitLine(m) {
   return parts.length ? `${parts.join("；")}。` : "";
 }
 
-export function buildReport(metrics, type, cycleCount = 1) {
+/**
+ * 读数可信度前置（v5.9 改动 4）：判断这份读数能不能给分数与等级。
+ * 满足任一条件就只出「这次读数只能作参考」+ 具体原因，不出 0–100 分数与 S/A/B/C/D 等级——
+ * 分数在这种素材上是最具误导性的东西：它看起来最正式，却最没有依据。
+ *
+ * ctx:
+ *   · unstable / unstableReasons —— 机位判定是否不固定及其依据
+ *   · peopleSeen                 —— 画面里出现的人数
+ *   · hasShot                    —— 主体轨迹是否检测到出手动作
+ *   · subjectFrames / totalFrames—— 计入主体的有效帧 / 总帧
+ *   · droppedFrames              —— 锁定/剔除导致没计入的帧
+ *   · qualityLevel               —— 素材质量等级（bad 时同样不出分）
+ */
+export function noScoreReasons(ctx = {}) {
+  const {
+    unstable = false, unstableReasons = [],
+    peopleSeen = 1, hasShot = false,
+    subjectFrames = 0, totalFrames = 0, droppedFrames = 0,
+    qualityLevel = null,
+  } = ctx;
+  const reasons = [];
+  if (unstable) {
+    reasons.push(
+      `机位在拍摄过程中变化，本次读数为近似值（${unstableReasons.join("；") || "机位判定不稳定"}）`
+    );
+  }
+  if (peopleSeen > 1 && !hasShot) {
+    reasons.push(`画面里有 ${peopleSeen} 个人，但没能确定谁在投`);
+  }
+  if (!hasShot) {
+    reasons.push("没有检测到完整的投篮动作（手腕连续高于肩 4 帧以上），读数仅供参考");
+  }
+  const total = totalFrames || 1;
+  const validShare = subjectFrames / total;
+  if (validShare < 0.7) {
+    reasons.push(`主体有效帧占比只有 ${Math.round(validShare * 100)}%（${subjectFrames}/${total}），不足 70%`);
+  }
+  if (droppedFrames / total > 0.2) {
+    reasons.push(`锁定/剔除导致的丢帧 ${Math.round((droppedFrames / total) * 100)}%，超过 20%`);
+  }
+  if (qualityLevel === "bad") {
+    reasons.push("素材质量不合格（见下方质量提醒）");
+  }
+  return reasons;
+}
+
+/**
+ * 主体是谁：一句话说明（画面哪个位置、有没有出手动作、出手在哪几秒）
+ * 纯函数：app.js 与离线回放工具（tools/replay-landmarks.mjs）共用同一份口径，
+ * 报告里写的和验收脚本看到的永远是同一句话。
+ */
+export function subjectLabelText(subject) {
+  const tr = subject?.track;
+  if (!tr) return "未能确定";
+  const spans = tr.stats.shotSpans ?? [];
+  if (spans.length) {
+    const s = spans[0];
+    // 位置用「出手那一刻」的横向位置：整条轨迹的中位会把位置说偏
+    // （真实素材里，人是出手的同时往画面右边走出画面的）
+    const pos = describePosition(tr.stats.shotX ?? tr.stats.x);
+    return `${pos}正在出手的那个（${s.from.toFixed(1)}–${s.to.toFixed(1)} 秒）`;
+  }
+  const pos = describePosition(tr.stats.x);
+  return `${pos}的那个人（未检测到出手动作）`;
+}
+
+/**
+ * 主体是谁（短版）：位置 + 出手时刻区间，给「画面里有几个人」这类提示用。
+ * 没有出手动作时返回 null——调用方据此区分「按出手证据选到了人」和「没选到」。
+ */
+export function subjectShotDesc(subject) {
+  const tr = subject?.track;
+  if (!tr) return null;
+  const spans = tr.stats.shotSpans ?? [];
+  if (!spans.length) return null;
+  const s = spans[0];
+  const pos = describePosition(tr.stats.shotX ?? tr.stats.x);
+  return `${pos}，${s.from.toFixed(1)}–${s.to.toFixed(1)} 秒`;
+}
+
+/**
+ * 报告顶部固定一行摘要：测到几项 · 机位与依据 · 主体是谁 · 有效帧多少
+ */
+export function summaryLineText({
+  metricCount = 0, metricTotal = 0,
+  view = "unknown", viewInfo = null,
+  subject = null, subjectFrames = 0, totalFrames = 0,
+  detectedFrames = 0, invalidFrames = 0,
+} = {}) {
+  const viewText = viewInfo
+    ? `${VIEW_LABEL[view]}（依据：${viewInfo.reason}）`
+    : VIEW_LABEL[view];
+  const items = metricCount ? `本次测到 ${metricCount}/${metricTotal} 项` : "";
+  // 帧的账一次说清，三个口径分开写：同一个词「有效帧」在摘要和「只能作参考」里
+  // 说的不是一回事，会让人以为算错了。
+  //   · 检出 = 认出有人像的帧
+  //   · 有效 = 姿态可用、没被剔除的帧（检出 − 无效姿态）
+  //   · 主体 = 其中算在主体头上的帧（别人的帧不计入）
+  const validFrames = Math.max(0, detectedFrames - invalidFrames);
+  const frameNote = invalidFrames
+    ? `（主体计入 ${subjectFrames}，已剔除 ${invalidFrames} 帧无效姿态）`
+    : `（主体计入 ${subjectFrames}）`;
+  return [
+    items,
+    `机位：${viewText}`,
+    `主体：${subjectLabelText(subject)}`,
+    `检出 ${detectedFrames}/${totalFrames} 帧人像`,
+    `有效 ${validFrames}/${totalFrames} 帧${frameNote}`,
+  ].filter(Boolean).join(" · ");
+}
+
+/**
+ * 状态行：识别完成后那句话（主体有效帧 / 剔除的无效姿态 / 主体是谁 / 机位）
+ */
+export function statusLineText({
+  subjectFrames = 0, totalFrames = 0,
+  detectedFrames = 0, invalidFrames = 0, otherFrames = 0,
+  peopleSeen = 1, subject = null,
+  view = "unknown", viewInfo = null, failedFrames = 0,
+} = {}) {
+  return (
+    `识别完成：${detectedFrames}/${totalFrames} 帧检测到人像` +
+    `（已剔除 ${invalidFrames} 帧无效姿态；主体有效帧 ${subjectFrames}，${otherFrames} 帧未计入）` +
+    `${peopleSeen > 1 ? `（画面出现 ${peopleSeen} 人）` : ""}` +
+    `，主体：${subjectLabelText(subject)}，机位：${VIEW_LABEL[view]}${viewInfo?.unstable ? "（不固定）" : ""}。` +
+    `${failedFrames ? `⚠️ ${failedFrames} 帧推理失败已插值。` : ""}报告已生成，也可点击播放查看骨架叠加。`
+  );
+}
+
+export function buildReport(metrics, type, cycleCount = 1, opts = {}) {
   // 自动识别：三分/中投/跳投的评分标准相同（都要求起跳），真正要区分的只有罚球（贴地）——
   // 起跳幅度本身就是测量值，按中位数直接判定即可
   let autoType = false;
@@ -175,6 +306,8 @@ export function buildReport(metrics, type, cycleCount = 1) {
   const judged = metrics.map((m) => {
     let verdict = m.verdictOverride ?? judge(m);
     let name = m.name;
+    // 斜侧近似项：读数会偏大，不直接判「需重点纠正」（降级为待改进，并在行内标注）
+    if (m.approxNote && verdict === "bad") verdict = "warn";
     if (m.id === "jump") {
       verdict = m.num > JUMP_MIN ? (type === "free" ? "warn" : "good") : type === "free" ? "good" : "warn";
       if (type === "free") name = "罚球贴地"; // 自动识别为罚球时按罚球口径命名
@@ -183,11 +316,16 @@ export function buildReport(metrics, type, cycleCount = 1) {
   });
   const scored = judged.filter((m) => m.verdict !== "info"); // info=趋势参考，不计分
   const totalW = scored.reduce((s, m) => s + m.weight, 0);
-  const score = Math.round(
+  const rawScore = Math.round(
     (scored.reduce((s, m) => s + m.weight * ({ good: 1, warn: 0.5, bad: 0 })[m.verdict], 0) /
       (totalW || 1)) * 100
   );
-  const grade = score >= 90 ? "S" : score >= 75 ? "A" : score >= 60 ? "B" : score >= 45 ? "C" : "D";
+  const rawGrade = rawScore >= 90 ? "S" : rawScore >= 75 ? "A" : rawScore >= 60 ? "B" : rawScore >= 45 ? "C" : "D";
+  // v5.9：读数不可信时不出分数与等级（机位不固定 / 主体存疑 / 有效帧太少 / 素材质量差）。
+  // 分数与等级在这种素材上是最具误导性的东西——它看起来最正式，却最没有依据。
+  const noScoreReasons = (opts.noScoreReasons ?? []).filter(Boolean);
+  const score = noScoreReasons.length ? null : rawScore;
+  const grade = noScoreReasons.length ? null : rawGrade;
   // 建议带实测值与回看帧号（frame 由 computeMetrics 附带），渲染层据此提供「点击回看视频瞬间」
   const tips = judged
     .filter((m) => m.verdict === "warn" || m.verdict === "bad")
@@ -203,7 +341,7 @@ export function buildReport(metrics, type, cycleCount = 1) {
       };
     })
     .filter((t) => t.text);
-  return { type, score, grade, metrics: judged, tips, cycleCount, autoType };
+  return { type, score, grade, metrics: judged, tips, cycleCount, autoType, noScore: noScoreReasons.length ? noScoreReasons : null };
 }
 
 export function renderReport(el, report, opts = {}) {
@@ -211,6 +349,10 @@ export function renderReport(el, report, opts = {}) {
   const count = (v) => report.metrics.filter((m) => m.verdict === v).length;
   const canJump = (f) => f != null && !!opts.jump; // 只有主报告接了回看监听，才显示点击跳转
   const compare = opts.compare ?? {}; // 由 app.js 用 compareMetric 算好：{ [指标id]: {prev, delta, better, count} }
+  // 读数只能作参考（机位不固定 / 主体存疑 / 有效帧不足）时，判语必须带限定：
+  // 「❌ 需重点纠正」看上去像硬结论，但读数只是近似值，不能那么读。
+  const referenceOnly = !!report.noScore;
+  const approxBadge = '<i class="m-approx">近似值，仅供参考</i>';
 
   // 「较上次」标记：箭头跟数值增减（↑ 就是比上次大），颜色跟「变好/变差」（better 字段）——
   // 头部晃动、重心横移这类越小越好的指标，数值下降才是变好，颜色不能跟着数值走
@@ -244,9 +386,13 @@ export function renderReport(el, report, opts = {}) {
       return `
       <div class="metric-item" data-metric="${escHtml(m.id)}">
         <div class="metric-row ${m.verdict}">
-          <span class="m-name">${m.name}${m.src ? ` <i class="m-src">${m.src}</i>` : ""}${infoBtn}</span>
+          <span class="m-name">${m.name}${m.src ? ` <i class="m-src">${m.src}</i>` : ""}${infoBtn}${
+            m.approxNote ? `<i class="m-approx">${escHtml(m.approxNote)}</i>` : ""
+          }</span>
           <span class="m-value">${m.value}<small>参考 ${m.rangeText}</small>${trendTag(m)}</span>
-          <span class="m-icon">${vIcon[m.verdict]}</span>
+          <span class="m-icon">${vIcon[m.verdict]}</span>${
+            referenceOnly && (m.verdict === "bad" || m.verdict === "warn") ? approxBadge : ""
+          }
         </div>${plainPanel}
       </div>`;
     })
@@ -256,8 +402,9 @@ export function renderReport(el, report, opts = {}) {
     .map(
       (t) => `
       <div class="tip-card${canJump(t.frame) ? " clickable" : ""}"${canJump(t.frame) ? ` data-frame="${t.frame}"` : ""}>
-        <b>${t.level === "bad" ? "❌" : "⚠️"} ${t.name} ${t.value ?? ""}</b>
+        <b>${t.level === "bad" && !referenceOnly ? "❌" : "⚠️"} ${t.name} ${t.value ?? ""}</b>
         <p>${t.text}</p>
+        ${referenceOnly ? `<p class="m-approx">近似值，仅供参考（本次读数只能作参考）</p>` : ""}
         ${canJump(t.frame) ? '<span class="tip-jump">▶ 点击回看视频瞬间</span>' : ""}
       </div>`
     )
@@ -312,14 +459,58 @@ export function renderReport(el, report, opts = {}) {
       </details>`
     : "";
 
+  // v5.9：报告顶部固定一行摘要（测到几项 / 机位与依据 / 主体是谁 / 有效帧多少）
+  const summaryLine = opts.summaryLine
+    ? `<p class="summary-line">${escHtml(opts.summaryLine)}</p>`
+    : "";
+
+  // 素材质量提醒与「读数只能作参考」合并成同一个提示块：
+  // 页面上下两处各说一遍会互相打架（一边说「锁定占画面最大的那个」，一边说主体是按出手动作选的）。
+  const qualityItems =
+    opts.quality && opts.quality.level !== "ok"
+      ? (opts.quality.issues ?? []).map((i) => `${i.title}：${i.text}`)
+      : [];
+  const noticeItems = [...(report.noScore ?? []), ...qualityItems];
+  const noticeBlock = noticeItems.length
+    ? `<div class="report-noscore">
+        <b>${
+          report.noScore
+            ? "⚠️ 这次读数只能作参考"
+            : "⚠️ 素材质量提醒（报告还能看，但读数可能不稳）"
+        }</b>
+        <ul>${noticeItems.map((r) => `<li>${escHtml(r)}</li>`).join("")}</ul>
+      </div>`
+    : "";
+
+  // 素材质量良好时只是一行轻量说明，不算提醒块（没有提醒可合并时单独出现）
+  const qualityOkLine =
+    opts.quality?.level === "ok" && !noticeBlock
+      ? `<p class="report-quality ok">✅ 素材质量：良好（认出 ${Math.round((opts.quality.stats?.frameRatio ?? 0) * 100)}% 的画面${
+          opts.quality.stats?.personHeight > 0
+            ? `，人占画面高度 ${Math.round(opts.quality.stats.personHeight * 100)}%`
+            : ""
+        }）。</p>`
+      : "";
+
   el.innerHTML = `
+    <div class="report-head">
+      ${summaryLine}
+      ${noticeBlock}
+      ${qualityOkLine}
+    </div>
     <div class="report-summary">
-      <div class="score-ring" style="--p:${report.score}">
-        <div class="score-inner"><b>${report.score}</b><small>${report.grade}</small></div>
-      </div>
+      ${
+        report.score == null
+          ? `<div class="score-none"><b>—</b><small>不出分</small></div>`
+          : `<div class="score-ring" style="--p:${report.score}">
+              <div class="score-inner"><b>${report.score}</b><small>${report.grade}</small></div>
+            </div>`
+      }
       <div class="summary-text">
         <h3>${report.title ?? (report.autoType ? `自动识别：按${TYPE_LABEL[report.type]}标准` : `${TYPE_LABEL[report.type]}姿态评分`)}</h3>
-        <p>${count("good")} 项达标 · ${count("warn")} 项待改进 · ${count("bad")} 项需重点纠正${count("info") ? ` · ${count("info")} 项趋势参考` : ""}${report.cycleCount > 1 ? ` · 共 ${report.cycleCount} 次出手（指标取中位数）` : ""}</p>
+        <p>${count("good")} 项达标 · ${count("warn")} 项待改进 · ${count("bad")} ${
+          referenceOnly ? "项值得留意（读数为近似值）" : "项需重点纠正"
+        }${count("info") ? ` · ${count("info")} 项趋势参考` : ""}${report.cycleCount > 1 ? ` · 共 ${report.cycleCount} 次出手（指标取中位数）` : ""}</p>
         ${opts.compareSummary ? `<p class="compare-line">${opts.compareSummary}</p>` : ""}
         ${sceneLine}
         ${pfBits.length ? `<p class="profile-line">${pfBits.join(" · ")}</p>` : ""}

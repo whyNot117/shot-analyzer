@@ -1,32 +1,86 @@
 // 机位判别、识别质量评估与拍摄机位示意图（多角度分析支撑模块）
 // 坐标仍为归一化 0–1：classifyView 的比值混用横向(x)/纵向(y)量，x 须乘宽高比（帧上的 aspect）才是真实几何
+import { isValidPose, poseBodyHeight, shoulderRatio } from "./tracks.js";
 
 export const VIEW_LABEL = { side: "侧面", front: "正面", oblique: "斜侧", unknown: "未知" };
 
+// 肩宽比阈值（沿用 v5.8 的口径，不动）：<0.12 侧面，>0.17 正面，中间是斜侧
+export const SIDE_MAX = 0.12;
+export const FRONT_MIN = 0.17;
+
+const pct = (v) => `${Math.round(v * 100)}%`;
+
 /**
- * 判别拍摄机位：正对镜头时双肩水平张开（肩宽/体高比值大），侧对镜头时双肩几乎重叠（比值小）。
- * 逐帧取「双肩水平距离 × 宽高比 ÷ 体高」后取中位数，抗异常帧。返回 "side" | "front" | "oblique" | "unknown"。
+ * 判别拍摄机位（v5.9：返回带依据的形式，不再无依据地硬判一个机位）。
+ * 正对镜头时双肩水平张开（肩宽/躯干高比值大），侧对镜头时双肩几乎重叠（比值小）。
+ * 逐帧取「双肩水平距离 × 宽高比 ÷ 躯干高」后取中位数，抗异常帧。
+ *
+ * 返回 { view, ratio, sideShare, frontShare, unstable, reason, reasons }：
+ *   · view      —— "side" | "front" | "oblique" | "unknown"；机位不固定时一律按 "side"（保守：宁可少报）
+ *   · ratio     —— 肩宽比中位数
+ *   · sideShare —— 侧面帧（比值 < 0.12）占比
+ *   · frontShare—— 正面帧（比值 > 0.17）占比
+ *   · unstable  —— 机位在拍摄过程中是否变化（满足任一条件即成立）
+ *   · reason    —— 中文依据说明（报告里直接引用）
+ *
+ * 判「机位不固定」的三个条件：
+ *   a) 双峰：侧面帧占比 ≥25% 且正面帧占比 ≥25%
+ *   b) 运镜：主体体高在时间上的 p90/p10 > 3（人在画面里忽远忽近）
+ *   c) 比值分散：肩宽比的四分位距（p75−p25）> 0.08
+ * opts.manual = true 时跳过 unstable 判定（融合区手动指定机位时用）。
  */
-export function classifyView(frames) {
+export function classifyView(frames, opts = {}) {
   const ratios = [];
+  const heights = [];
   for (const f of frames) {
     const lm = f.landmarks;
     if (!lm) continue;
-    const ls = lm[11], rs = lm[12];
-    const shoulderY = (ls.y + rs.y) / 2;
-    const ankleY = (lm[27].y + lm[28].y) / 2;
-    const bodyH = Math.abs(ankleY - shoulderY);
-    if (bodyH < 0.15) continue; // 未全身入镜或倒地等异常帧不参与统计
-    ratios.push((Math.abs(ls.x - rs.x) * (f.aspect ?? 1)) / bodyH);
+    // 坏姿态（躯干高为负/过小、关键点不可信）不参与机位判定
+    if (!isValidPose(lm, f.aspect)) continue;
+    const r = shoulderRatio(lm, f.aspect);
+    if (r != null) ratios.push(r);
+    const h = poseBodyHeight(lm);
+    if (h != null && h > 0) heights.push(h);
   }
-  if (ratios.length < 5) return "unknown";
+  if (ratios.length < 5) {
+    return {
+      view: "unknown", rawView: "unknown", ratio: null,
+      sideShare: 0, frontShare: 0, iqr: 0, zoomRatio: 0,
+      unstable: false, reasons: [],
+      reason: "有效帧太少，无法判别机位（已按侧面近似处理）",
+    };
+  }
   ratios.sort((a, b) => a - b);
   const mid = ratios[Math.floor(ratios.length / 2)];
   // 校正后的比值≈真实「肩宽/身高」：正面约 0.20–0.26，纯侧约 0.02–0.06，斜侧约 0.15。
   // 上限 0.17 压在正面物理下限之下，防止正面被误判成斜侧而丢掉正面指标；下限 0.12 容纳常见 30° 转体站位
-  if (mid < 0.12) return "side";
-  if (mid > 0.17) return "front";
-  return "oblique";
+  const rawView = mid < SIDE_MAX ? "side" : mid > FRONT_MIN ? "front" : "oblique";
+  const q = (p) => ratios[Math.min(ratios.length - 1, Math.floor(ratios.length * p))];
+  const sideShare = ratios.filter((r) => r < SIDE_MAX).length / ratios.length;
+  const frontShare = ratios.filter((r) => r > FRONT_MIN).length / ratios.length;
+  const iqr = q(0.75) - q(0.25);
+  const hs = [...heights].sort((a, b) => a - b);
+  const hq = (p) => (hs.length ? hs[Math.min(hs.length - 1, Math.floor(hs.length * p))] : 0);
+  const zoomRatio = hq(0.9) / Math.max(1e-6, hq(0.1));
+
+  const reasons = [];
+  if (sideShare >= 0.25 && frontShare >= 0.25) {
+    reasons.push(`侧面帧占 ${pct(sideShare)}、正面帧占 ${pct(frontShare)}（双峰）`);
+  }
+  if (zoomRatio > 3) {
+    reasons.push(`运镜幅度 ${zoomRatio.toFixed(1)} 倍（体高 p90/p10）`);
+  }
+  if (iqr > 0.08) {
+    reasons.push(`比值分散（四分位距 ${iqr.toFixed(3)}）`);
+  }
+  const unstable = opts.manual ? false : reasons.length > 0;
+  // 机位不固定时一律按侧面近似处理：侧面专属指标比正面专属指标更少出错，宁可少报
+  const view = unstable ? "side" : rawView;
+  const basis = `肩宽比中位 ${mid.toFixed(3)}`;
+  const reason = unstable
+    ? `${basis}；${reasons.join("；")}`
+    : `${basis}（${rawView === "side" ? "低于 0.12，接近侧面" : rawView === "front" ? "高于 0.17，接近正面" : "介于 0.12–0.17，斜侧"}）`;
+  return { view, rawView, ratio: mid, sideShare, frontShare, iqr, zoomRatio, unstable, reasons, reason };
 }
 
 /** 关键点在 [from, to] 帧窗口内的平均可见度（0–1），用于评估识别质量 */
