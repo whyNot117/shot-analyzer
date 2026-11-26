@@ -22,6 +22,22 @@ header, main, footer { max-width: 720px; margin: 0 auto; padding: 16px; }
 header h1 { margin: 8px 0 4px; font-size: 1.5rem; }
 .subtitle { color: var(--muted); margin: 0 0 8px; font-size: 0.9rem; }
 
+/* 图解操作手册入口：跟 .btn 一样的观感，但不做主按钮的实心蓝底 */
+.manual-link { margin: 0 0 8px; }
+.manual-link a {
+  display: inline-block;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  color: var(--text);
+  font-size: 0.82rem;
+  text-decoration: none;
+  opacity: 0.85;
+  cursor: pointer;
+}
+.manual-link a:hover { opacity: 1; border-color: var(--accent-2); }
+
 .card {
   background: var(--card);
   border: 1px solid var(--line);

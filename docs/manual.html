@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>📖 图解操作手册 · 投篮姿态分析</title>
+<style>
+  :root {
+    --bg: #f8fafc; --card: #ffffff; --text: #0f172a; --muted: #64748b;
+    --line: #e2e8f0; --accent: #2563eb; --accent-2: #ea580c; --ok: #059669;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text); line-height: 1.75;
+    font: 16px/1.75 "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header { background: linear-gradient(135deg, #1e293b, #0f172a); color: #fff; padding: 40px 20px 32px; }
+  header .wrap, main { max-width: 860px; margin: 0 auto; }
+  header h1 { margin: 0 0 8px; font-size: 1.9rem; }
+  header p { margin: 0; color: #cbd5e1; }
+  .badge {
+    display: inline-block; margin-top: 14px; padding: 4px 12px; border-radius: 999px;
+    background: rgba(255,255,255,.12); font-size: .85rem; color: #e2e8f0;
+  }
+  .back { display: inline-block; margin-top: 14px; color: #e2e8f0; font-size: .9rem; }
+  main { padding: 28px 20px 60px; }
+  nav.toc { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 22px; margin-bottom: 28px; }
+  nav.toc h2 { margin: 0 0 10px; font-size: 1.05rem; }
+  nav.toc ol { margin: 0; padding-left: 20px; }
+  nav.toc li { margin: 3px 0; }
+  nav.toc a { color: var(--accent); text-decoration: none; }
+  nav.toc a:hover { text-decoration: underline; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 24px 26px; margin-bottom: 22px; }
+  h2.sec { margin: 0 0 6px; font-size: 1.35rem; }
+  h2.sec .n {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 30px; height: 30px; border-radius: 50%; background: var(--accent-2); color: #fff;
+    font-size: .95rem; margin-right: 10px; vertical-align: 2px;
+  }
+  .lead { color: var(--muted); margin: 0 0 18px; }
+  h3 { font-size: 1.05rem; margin: 22px 0 8px; }
+  ol.steps, ul.plain { padding-left: 22px; }
+  ol.steps li, ul.plain li { margin: 7px 0; }
+  code { background: #f1f5f9; border: 1px solid var(--line); border-radius: 6px; padding: 1px 7px; font-family: ui-monospace, Consolas, monospace; font-size: .9em; }
+  pre {
+    background: #0f172a; color: #e2e8f0; padding: 14px 16px; border-radius: 10px;
+    overflow-x: auto; font-family: ui-monospace, Consolas, monospace; font-size: .9rem; line-height: 1.6;
+  }
+  figure { margin: 18px 0; }
+  figure img { width: 100%; border: 1px solid var(--line); border-radius: 10px; display: block; box-shadow: 0 2px 10px rgba(15,23,42,.08); }
+  figcaption { color: var(--muted); font-size: .9rem; margin-top: 8px; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: .95rem; }
+  th, td { border: 1px solid var(--line); padding: 9px 11px; text-align: left; vertical-align: top; }
+  th { background: #f1f5f9; }
+  .callout { border-left: 4px solid var(--accent-2); background: #fff7ed; padding: 12px 16px; border-radius: 0 10px 10px 0; margin: 16px 0; }
+  .callout.ok { border-left-color: var(--ok); background: #ecfdf5; }
+  .callout b { color: var(--accent-2); }
+  .callout.ok b { color: var(--ok); }
+  .choice { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 14px 0; }
+  .choice > div { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; background: #fbfdff; }
+  .choice h4 { margin: 0 0 6px; font-size: 1rem; }
+  .choice p { margin: 4px 0; font-size: .93rem; color: var(--muted); }
+  footer { text-align: center; color: var(--muted); font-size: .9rem; padding: 0 20px 40px; }
+  @media (max-width: 640px) { .choice { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1>📖 图解操作手册</h1>
+    <p>拍一段投篮视频 → 几秒钟后拿到自己的姿势报告。全程在你自己电脑上完成，不用注册，视频不外传。</p>
+    <span class="badge">投篮姿态分析 · v5.10.1</span><br />
+    <a class="back" href="../index.html">← 返回首页</a>
+  </div>
+</header>
+
+<main>
+  <nav class="toc">
+    <h2>目录</h2>
+    <ol>
+      <li><a href="#s0">先看这里：你该用哪种方式</a></li>
+      <li><a href="#s1">打开页面</a></li>
+      <li><a href="#s2">下载到本机自己跑（离线 / 内网）</a></li>
+      <li><a href="#s3">分析一次投篮</a></li>
+      <li><a href="#s4">看懂结果</a></li>
+      <li><a href="#s5">进阶功能：多角度、对比、档案</a></li>
+      <li><a href="#s6">常见问题</a></li>
+      <li><a href="#s7">隐私：你的东西存在哪</a></li>
+    </ol>
+  </nav>
+
+  <section id="s0">
+    <h2 class="sec"><span class="n">0</span>先看这里：你该用哪种方式</h2>
+    <p class="lead">两种方式用的是同一套程序，界面完全一样，区别只在于「东西跑在哪」。</p>
+    <div class="choice">
+      <div>
+        <h4>方式一 · 网页版（推荐先用这个）</h4>
+        <p>浏览器打开一个网址就能用，<b>不用装任何东西</b>。</p>
+        <p>适合：偶尔用一次、想先试试效果。</p>
+        <p>代价：第一次要联网下载识别模型（约 5–10 MB，之后有缓存）。</p>
+      </div>
+      <div>
+        <h4>方式二 · 下载到本机跑</h4>
+        <p>代码下载到自己电脑，用本机的 Node.js 起服务，浏览器访问 <code>127.0.0.1:5500</code>。</p>
+        <p>适合：内网、断网、想改代码、当成自己的小工具。</p>
+        <p>代价：要先装 Node.js（十几分钟搞定）。</p>
+      </div>
+    </div>
+    <div class="callout ok"><b>两种方式都不上传你的视频。</b>视频、身高体重、训练档案全都只留在你自己的浏览器里，关掉页面就没了。</div>
+  </section>
+
+  <section id="s1">
+    <h2 class="sec"><span class="n">1</span>打开页面</h2>
+    <figure>
+      <img src="img/01-open.jpg" alt="应用首页" />
+      <figcaption>首页长这样。下面几个步骤里用到的按钮，全都在这一页上。</figcaption>
+    </figure>
+    <h3>方式一：直接用网页版</h3>
+    <p>浏览器地址栏输入：</p>
+    <pre>https://whyNot117.github.io/shot-analyzer/</pre>
+    <p>回车即可。这一页会一直开着，第一次访问时它会后台下载识别模型，等一会儿就好。</p>
+    <h3>方式二：本机跑起来之后</h3>
+    <p>浏览器地址栏输入（端口以你终端里打印的为准，端口被占用会自动顺延）：</p>
+    <pre>http://127.0.0.1:5500/</pre>
+  </section>
+
+  <section id="s2">
+    <h2 class="sec"><span class="n">2</span>下载到本机自己跑</h2>
+    <p class="lead">只有选方式二才需要做这一节。</p>
+    <figure>
+      <img src="img/14-download-zip.jpg" alt="GitHub 仓库页下载 ZIP" />
+      <figcaption>在仓库页面右上角点「Code」→「Download ZIP」。</figcaption>
+    </figure>
+    <ol class="steps">
+      <li><b>解压</b>：把下载的 ZIP 解压。Windows 会多套一层 <code>shot-analyzer-main</code> 文件夹，把里面的内容拿出来用就行。</li>
+      <li><b>装 Node.js</b>：到 <code>nodejs.org</code> 下载 LTS 版本，一路「下一步」装完。装完可以在开始菜单搜「PowerShell」验证：
+        <pre>node -v</pre>
+        出现 v18 以上的版本号就说明装好了。</li>
+      <li><b>启动</b>：在解压出来的文件夹里，双击 <code>启动本地测试.bat</code>。它会弹一个黑色小窗口（服务在跑），并自动打开浏览器。</li>
+      <li><b>手动启动也行</b>：在文件夹里按住 Shift 右键 →「在此处打开 PowerShell 窗口」，然后敲：
+        <pre>node server.mjs</pre></li>
+    </ol>
+    <figure>
+      <img src="img/15-local-server.jpg" alt="终端里启动本地服务" />
+      <figcaption>看到这个「已启动」提示就成功了。浏览器没自动打开的话，手动把地址复制到浏览器地址栏。</figcaption>
+    </figure>
+    <div class="callout">
+      <b>几个容易踩的坑</b>
+      <ul class="plain">
+        <li>那个黑色窗口别关——关掉服务就停了。按 <code>Ctrl+C</code> 也可以停。</li>
+        <li>端口被占用会自动往后顺延（5501、5502…），<b>以黑窗口里打印的地址为准</b>。</li>
+        <li>不要直接双击 <code>index.html</code>：浏览器禁止本地文件加载模块，页面会全是空白，一定要用上面的方式打开。</li>
+        <li>本地模式不注册 Service Worker：你改了代码刷新一下就是新的，不会有旧缓存捣乱。</li>
+      </ul>
+    </div>
+  </section>
+
+  <section id="s3">
+    <h2 class="sec"><span class="n">3</span>分析一次投篮</h2>
+    <p class="lead">按顺序做，一步步来。全程大概十几秒到一分钟。</p>
+
+    <h3>① 选视频</h3>
+    <figure>
+      <img src="img/02-pick-video.jpg" alt="选择视频" />
+      <figcaption>点「📷 选择 / 拍摄视频」，在弹出的文件框里挑你拍好的那段 MP4（手机相册里的也行）。</figcaption>
+    </figure>
+
+    <h3>② 确认文件已就位</h3>
+    <figure>
+      <img src="img/03-file-loaded.jpg" alt="文件已选择" />
+      <figcaption>这里出现文件名和大小，同时「2. 分析」整块自动冒出来，说明视频已经读到了。</figcaption>
+    </figure>
+
+    <h3>③ 顺手对一下拍摄清单</h3>
+    <figure>
+      <img src="img/04-checklist.jpg" alt="拍摄清单" />
+      <figcaption>这是给「下一次拍摄」用的自查清单，照着拍读数会准不少。这一次的视频已经拍完了，不勾也照样能分析。</figcaption>
+    </figure>
+
+    <h3>④ 投篮类型</h3>
+    <figure>
+      <img src="img/05-shot-type.jpg" alt="投篮类型下拉" />
+      <figcaption>一般保持默认的「自动识别（按是否起跳）」就行。只有你很确定是定点罚球、又怕它认错时才手动选。</figcaption>
+    </figure>
+
+    <h3>⑤ 场景</h3>
+    <figure>
+      <img src="img/06-scene.jpg" alt="场景下拉" />
+      <figcaption>同样保持「自动识别」。它靠画面里有没有横向移动，来判断你是定点站投还是移动后出手。</figcaption>
+    </figure>
+
+    <h3>⑥ 开始分析</h3>
+    <figure>
+      <img src="img/07-analyze.jpg" alt="开始分析按钮" />
+      <figcaption>点「🧠 开始分析」。第一次会先下载识别模型（网页版约 5–10 MB，本机版直接从本地读），然后逐帧扫描。</figcaption>
+    </figure>
+    <div class="callout">
+      <b>等待期间不用管它</b>，进度条会走到 100%，然后报告自动出现。视频超过 30 秒时只分析前 30 秒。
+    </div>
+  </section>
+
+  <section id="s4">
+    <h2 class="sec"><span class="n">4</span>看懂结果</h2>
+
+    <h3>报告</h3>
+    <figure>
+      <img src="img/08-report.jpg" alt="姿态报告" />
+      <figcaption>第 3 步就是报告。</figcaption>
+    </figure>
+    <ul class="plain">
+      <li><b>分数只是筛查参考，不是命中率预测</b>，也别跟别人的分数横向比（不同机位、不同版本口径不一样）。</li>
+      <li>每个指标名后面的 ⓘ 能就地展开「它到底在量什么」，点开看白话解释。</li>
+      <li>报告顶部如果有提醒（素材太远、人被挡住、只有一次出手…），先按提醒重拍，比纠结分数有用。</li>
+      <li>报告结尾会写明「主体跟到第几秒」——之后画面里是别人，所以那一段没有你的骨架。</li>
+    </ul>
+
+    <h3>骨架叠加</h3>
+    <figure>
+      <img src="img/09-overlay.jpg" alt="视频上的骨架叠加" />
+      <figcaption>播放时骨架跟着人走。</figcaption>
+    </figure>
+    <ul class="plain">
+      <li><b>蓝色骨架 + 橙色关节</b> = 本次分析的那个人（你）。</li>
+      <li><b>灰色骨架</b> = 画面里的其他人。看到灰骨架说明主体已经走出镜头，现在跟拍的是别人，不是程序坏了。</li>
+    </ul>
+
+    <h3>显示开关</h3>
+    <figure>
+      <img src="img/10-toggles.jpg" alt="骨架/关键点/角度开关" />
+      <figcaption>三个开关随时可改：只留骨架线、去掉角度数字，都随你。</figcaption>
+    </figure>
+  </section>
+
+  <section id="s5">
+    <h2 class="sec"><span class="n">5</span>进阶功能</h2>
+
+    <h3>多角度融合</h3>
+    <figure>
+      <img src="img/11-fusion.jpg" alt="多角度融合" />
+      <figcaption>侧面机位看不到肘内外展和左右对称，正面机位看不到下蹲深度。按报告里的补拍建议补一段，传到这里生成融合报告。</figcaption>
+    </figure>
+
+    <h3>动作对比</h3>
+    <figure>
+      <img src="img/12-compare.jpg" alt="动作对比" />
+      <figcaption>传一段参考视频（教练示范、职业球员片段都行），它会逐帧对齐后对比你们各关节的差异。</figcaption>
+    </figure>
+
+    <h3>训练档案</h3>
+    <figure>
+      <img src="img/13-history.jpg" alt="训练档案" />
+      <figcaption>每次分析自动存进本机档案，可以导出成文件带走，换设备时导入。档案和视频一样不上传。</figcaption>
+    </figure>
+  </section>
+
+  <section id="s6">
+    <h2 class="sec"><span class="n">6</span>常见问题</h2>
+    <table>
+      <tr><th>你看到的</th><th>原因</th><th>怎么办</th></tr>
+      <tr><td>双击 index.html 打开是空白页</td><td>浏览器禁止本地文件加载 ES 模块</td><td>改用 <code>启动本地测试.bat</code> 或 <code>node server.mjs</code>，地址必须是 <code>http://</code> 开头</td></tr>
+      <tr><td>一直停在「加载识别模型中…」</td><td>模型有 5–10 MB，网络慢或被限制</td><td>耐心等；或改用本机版（模型在本地）</td></tr>
+      <tr><td>浏览器打开了但页面是旧的</td><td>Service Worker 缓存</td><td>按 <code>Ctrl+F5</code> 强刷；线上版缓存名带版本号，代码更新后会自动换</td></tr>
+      <tr><td>端口被占用</td><td>5500 已被别的程序用</td><td>服务会自动顺延，看终端打印的实际地址</td></tr>
+      <tr><td>没有骨架 / 没有分数</td><td>素材质量预检没过（人太小、被挡住、次数太少）</td><td>报告顶部会给重拍指引，按它说的重拍一次</td></tr>
+      <tr><td>分数忽高忽低</td><td>单机位 + 只投了一次</td><td>连着投 3–5 次取中位数；再补一段正面机位做融合</td></tr>
+      <tr><td>报告说「主体跟到 X 秒之后是其他人」</td><td>你走出画面了</td><td>正常提示，不是故障</td></tr>
+    </table>
+  </section>
+
+  <section id="s7">
+    <h2 class="sec"><span class="n">7</span>隐私：你的东西存在哪</h2>
+    <ul class="plain">
+      <li><b>视频</b>：只在本机浏览器里解码，程序里没有任何上传代码。</li>
+      <li><b>身高 / 体重 / 年龄</b>：存在本机浏览器的 localStorage，用来把身高换算成角度，出报告可以按你的身高定制。</li>
+      <li><b>训练档案</b>：评分历史也存在本机，导出就是给你自己的文件。</li>
+      <li>唯一的网络请求是下载识别模型（MediaPipe 的 wasm 与 <code>.task</code> 模型文件）——那是程序本身，不是你的视频。</li>
+      <li>清浏览器数据会一并清掉这些内容，重要的话记得先「⬇️ 导出」。</li>
+    </ul>
+  </section>
+
+  <footer>投篮姿态分析 · 图解操作手册 v1（对应程序 v5.10.1）· 有疑问先看第 6 节</footer>
+</main>
+</body>
+</html>

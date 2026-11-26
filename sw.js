@@ -1,7 +1,7 @@
 // Service Worker：应用与模型缓存，离线可用
 // 缓存名带版本号：代码一升级就换名，旧缓存会在 activate 时被清掉，
 // 否则「缓存优先」会让用户一直拿到旧文件，改了代码也看不到效果。
-const CACHE = "shot-analyzer-v5.10.1";
+const CACHE = "shot-analyzer-v5.11";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -24,6 +24,24 @@ const APP_SHELL = [
   "./js/app.js",
   "./manifest.json",
   "./icon.svg",
+  "./docs/manual.html",
+  // docs/img/ 下的手册截图也一并缓存，离线时手册也能看
+  "./docs/使用手册.md",
+  "./docs/img/01-open.jpg",
+  "./docs/img/02-pick-video.jpg",
+  "./docs/img/03-file-loaded.jpg",
+  "./docs/img/04-checklist.jpg",
+  "./docs/img/05-shot-type.jpg",
+  "./docs/img/06-scene.jpg",
+  "./docs/img/07-analyze.jpg",
+  "./docs/img/08-report.jpg",
+  "./docs/img/09-overlay.jpg",
+  "./docs/img/10-toggles.jpg",
+  "./docs/img/11-fusion.jpg",
+  "./docs/img/12-compare.jpg",
+  "./docs/img/13-history.jpg",
+  "./docs/img/14-download-zip.jpg",
+  "./docs/img/15-local-server.jpg",
 ];
 self.addEventListener("install", (e) => {
   e.waitUntil(
