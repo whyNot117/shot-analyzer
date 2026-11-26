@@ -1,0 +1,4 @@
+# Git hooks 是 shell 脚本，必须保持 LF 行尾。
+# 若被转成 CRLF，Linux/macOS 上的 sh 会因为 "#!/bin/sh\r" 而拒绝执行。
+tools/hooks/* text eol=lf
+tools/*.mjs text eol=lf

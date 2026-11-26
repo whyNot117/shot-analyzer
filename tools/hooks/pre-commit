@@ -1,0 +1,21 @@
+#!/bin/sh
+# 提交前检查：暂存区里是否混入了被本机 DLP 加密驱动（TsdEncrypt）写坏的密文 blob。
+#
+# 为什么需要它：
+#   TEC Solutions 的 TsdEncrypt/TsdEncryptMF 过滤驱动会把部分文件以密文容器落盘，
+#   magic 为 "%TSD-Header-###%"。git add 时若读到的是密文，密文就会进入仓库，
+#   GitHub Pages 的 Jekyll 构建随即失败，而且本地毫无征兆，只有远端 CI 变红。
+#   这个钩子把「远端静默失败」变成「本地提交被拒」。
+#
+# 详见 tools/check-tsd-encryption.mjs 顶部的说明。
+
+repo_root=$(git rev-parse --show-toplevel)
+checker="$repo_root/tools/check-tsd-encryption.mjs"
+
+if [ ! -f "$checker" ]; then
+    echo "[TSD 检查] 找不到 $checker，跳过检查。" >&2
+    exit 0
+fi
+
+node "$checker"
+exit $?
