@@ -227,6 +227,26 @@ node test/sync-test.mjs
 
 新增指标时记得同步写 `js/glossary.js` 里的白话文案——`test/glossary-test.mjs` 会因此失败（这是故意的：忘了写文案，报告里就会出现一句普通球友看不懂的指标名）。
 
+### 装上 DLP 密文拦截（clone 后跑一次）
+
+```bash
+npm run setup
+```
+
+**为什么需要它。** 某些公司电脑装了 DLP 加密驱动（TEC Solutions 的 TsdEncrypt），会把部分文件以**密文容器**形式落盘，文件头是 `%TSD-Header-###%`。Git 在 `git add` 时有时读到的是密文而不是明文，于是密文被提交进仓库——本地一切正常，GitHub Pages 的 Jekyll 构建却会失败（build 红灯、deploy 跳过），而且报错完全看不出真实原因。
+
+`npm run setup` 会把 `tools/hooks/pre-commit` 挂到 `core.hooksPath` 上。以后每次提交，钩子都会先检查暂存区里有没有密文容器，**有就直接拒绝提交**，并告诉你哪个文件中招了。
+
+```bash
+npm run check:tsd      # 手动体检：索引 + 工作区
+npm run test:tsd       # 检测器自检（造一个密文，验证能拦下）
+npm run test:tsd:e2e   # 端到端：真实 git commit 面对密文必须被拦下
+```
+
+> `core.hooksPath` 是本地配置、不随仓库分发，所以**每次 clone 或换机器都要跑一次 `npm run setup`**。
+>
+> 这是护栏，不是根治。根治办法是请 IT 把项目目录加入 DLP 加密策略的**排除名单**——否则密文仍会源源不断产生，钩子只能保证它不进仓库。
+
 ### 真实素材端到端验证（tools/e2e-real.mjs）
 
 合成测试验证不了真实拍摄里的定位漂移与透视畸变，这一步用真人素材跑完整流程：
