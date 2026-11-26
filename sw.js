@@ -1,7 +1,7 @@
 // Service Worker：应用与模型缓存，离线可用
 // 缓存名带版本号：代码一升级就换名，旧缓存会在 activate 时被清掉，
 // 否则「缓存优先」会让用户一直拿到旧文件，改了代码也看不到效果。
-const CACHE = "shot-analyzer-v5.9";
+const CACHE = "shot-analyzer-v5.10.1";
 const APP_SHELL = [
   "./",
   "./index.html",
@@ -20,6 +20,7 @@ const APP_SHELL = [
   "./js/scene.js",
   "./js/quality.js",
   "./js/glossary.js",
+  "./js/sync.js",
   "./js/app.js",
   "./manifest.json",
   "./icon.svg",

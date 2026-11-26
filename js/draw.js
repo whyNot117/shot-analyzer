@@ -59,12 +59,16 @@ export function pickShootingSide(frames, cycle, fallback = "right") {
 /**
  * 在 canvas 上绘制一帧骨架。
  * landmarks: 33 个 {x, y, visibility}（归一化 0–1），可为 null（该帧未识别到人）
+ * tone: "subject"（默认，主体配色）/ "other"（画面里的其他人：暗灰线、暗灰点、不画角度）
+ * clear: 是否先清空画布（默认 true）。画「他人 + 主体」两层时，第一层清空、
+ *       后面那层传 false，避免把上面那层擦掉。
  */
-export function drawFrame(ctx, landmarks, { showSkeleton, showJoints, showAngles, side } = {}) {
+export function drawFrame(ctx, landmarks, { showSkeleton, showJoints, showAngles, side, tone = "subject", clear = true } = {}) {
   const w = ctx.canvas.width, h = ctx.canvas.height;
-  ctx.clearRect(0, 0, w, h);
+  if (clear) ctx.clearRect(0, 0, w, h);
   if (!landmarks) return;
   const P = (l) => ({ x: l.x * w, y: l.y * h, v: l.visibility ?? 1 });
+  const other = tone === "other";
 
   if (showSkeleton) {
     ctx.lineWidth = Math.max(2, w / 240);
@@ -73,7 +77,10 @@ export function drawFrame(ctx, landmarks, { showSkeleton, showJoints, showAngles
       const a = P(landmarks[i]), b = P(landmarks[j]);
       const vis = Math.min(a.v, b.v);
       if (vis < 0.3) continue;
-      ctx.strokeStyle = `rgba(56, 189, 248, ${Math.min(1, vis)})`;
+      // 主体是蓝色线；画面里的其他人用暗灰线，避免抢走主体的视觉主导
+      ctx.strokeStyle = other
+        ? `rgba(148, 163, 184, ${0.45 * Math.min(1, vis)})`
+        : `rgba(56, 189, 248, ${Math.min(1, vis)})`;
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
@@ -86,14 +93,17 @@ export function drawFrame(ctx, landmarks, { showSkeleton, showJoints, showAngles
       const p = P(l);
       if (p.v < 0.3) return;
       const key = KEY_JOINTS.has(i);
-      ctx.fillStyle = key ? "#f97316" : "rgba(148, 163, 184, 0.9)";
+      ctx.fillStyle = other
+        ? "rgba(148, 163, 184, 0.5)"
+        : (key ? "#f97316" : "rgba(148, 163, 184, 0.9)");
       ctx.beginPath();
-      ctx.arc(p.x, p.y, key ? Math.max(4, w / 160) : Math.max(2.5, w / 280), 0, Math.PI * 2);
+      const r = other ? Math.max(2.5, w / 280) : (key ? Math.max(4, w / 160) : Math.max(2.5, w / 280));
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
       ctx.fill();
     });
   }
 
-  if (showAngles && side) {
+  if (showAngles && side && !other) {
     const s = SIDE[side];
     drawAngle(ctx, landmarks, s.shoulder, s.elbow, s.wrist, "肘");
     drawAngle(ctx, landmarks, s.hip, s.knee, s.ankle, "膝");

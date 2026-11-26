@@ -314,13 +314,40 @@ export function applySubject(scanFrames, tracks) {
     const lm = subjectAt.get(f.t) ?? null;
     if (lm) subjectFrames++;
     else if (validCount) otherFrames++; // 有有效姿态但不属于主体（别人）→ 未计入
-    frames.push({ t: f.t, landmarks: lm, aspect: f.aspect });
+    // v5.10：除主体外的有效姿态也留下来（最多 2 个，按体高从大到小）。
+    // 「画面里有人却没有骨架」的困惑就来自这里——主体跟丢了以后，画面里的人
+    // 不是没检测到，而是没画；叠加层用暗灰色画出来就说得清了。
+    const others = collectOthers(poses, lm, f.aspect);
+    // pt：该帧真正上屏的时间戳（rVFC 的 mediaTime）；老数据没有就回退用 t
+    frames.push({ t: f.t, pt: f.pt ?? f.t, landmarks: lm, others, aspect: f.aspect });
   }
   return {
     frames,
     subject: { track, reason },
     stats: { total: frames.length, detected, invalid, valid, subjectFrames, otherFrames },
   };
+}
+
+/**
+ * 该帧里「有效但不是主体」的候选姿态（最多 2 个，按体高从大到小）。
+ * 与 otherFrames（统计口径：有多少帧有有效姿态但不是主体）不是一回事：
+ * 这里是这些帧上的具体姿态，画给用户看。
+ */
+function collectOthers(poses, subjectLm, aspect) {
+  const list = (poses ?? []).filter(
+    (lm) => isValidPose(lm, aspect) && !samePose(lm, subjectLm)
+  );
+  list.sort((a, b) => (poseBodyHeight(b) ?? 0) - (poseBodyHeight(a) ?? 0));
+  return list.slice(0, 2);
+}
+
+/** 两个候选是不是同一个人：先比引用，再比头点坐标（拷贝过的对象也能认出来）。 */
+function samePose(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const pa = a[0], pb = b[0];
+  if (!pa || !pb) return false;
+  return Math.abs(pa.x - pb.x) < 1e-6 && Math.abs(pa.y - pb.y) < 1e-6;
 }
 
 /**

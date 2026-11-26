@@ -17,8 +17,9 @@ import {
 import { lineChart } from "./charts.js";
 import { SCENE_LABEL } from "./scene.js";
 import { assessClipQuality, renderShotChecklist, qualityCardHTML } from "./quality.js";
+import { frameIndexAt, supportsFrameCallback } from "./sync.js";
 
-console.log("🏀 投篮姿态分析 · 代码版本 v5.9（2026-11-26）——评分异常时请先确认此版本并强制刷新（Ctrl+F5）");
+console.log("🏀 投篮姿态分析 · 代码版本 v5.10.1（2026-11-26）——评分异常时请先确认此版本并强制刷新（Ctrl+F5）");
 
 const $ = (id) => document.getElementById(id);
 const esc = escHtml;
@@ -46,6 +47,7 @@ let subjectInfo = null;  // 主体选取结果（哪条轨迹、为什么是它�
 let frameStats = null;   // 帧的账：检出/无效/有效/计入主体/未计入
 let mainVis = 0;         // 主视频动作窗口内出手侧关键点平均可见度
 let quality = null;      // 素材质量判定缓存：同一段视频只判一次，切换投篮类型/场景不重判
+let seekOffset = null;   // 视频帧时间戳栅格相对名义采样时刻的偏移（秒）
 
 // PWA：注册 Service Worker，缓存应用与模型，二次访问离线可用
 if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
@@ -95,6 +97,8 @@ video.addEventListener("loadedmetadata", () => {
   $("toggles").classList.add("hidden");
   $("step-report").classList.add("hidden"); // 换新视频时隐藏上一份报告
   frames = [];
+  lastMediaTime = null; // 换源：上屏时间戳重来
+  seekOffset = null;    // 换源：帧时间戳栅格也跟着换，偏移重新测
   lastCycle = null;
   lastCycles = [];
   lastDetection = null;
@@ -105,6 +109,12 @@ video.addEventListener("loadedmetadata", () => {
   updateFusionUI();
   overlay.width = video.videoWidth;
   overlay.height = video.videoHeight;
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  // 换源后旧的 rVFC 回调可能失效，重新挂一条（token 作废旧链）
+  if (loopRunning) {
+    if (supportsFrameCallback(video)) startFrameCallbackLoop();
+    else startAnimationLoop();
+  }
   inferCanvas.width = video.videoWidth;
   inferCanvas.height = video.videoHeight;
   $("btn-analyze").scrollIntoView({ behavior: "smooth", block: "center" });
@@ -205,24 +215,87 @@ async function analyze() {
 }
 
 // ---------- 3. 播放叠加 ----------
-// 常驻渲染循环：按视频当前时间取最近一帧结果画到 overlay 上
+// 常驻渲染循环：按「屏幕上真正显示的那一帧」取骨架画到 overlay 上。
+// v5.10：旧实现用 requestAnimationFrame + video.currentTime 反推帧号，
+// currentTime 是播放时钟，可能比已经上屏的那一帧快一帧，人一动骨架就错位。
+// 现在优先用 requestVideoFrameCallback 的 metadata.mediaTime（真正上屏帧的时间戳）
+// 去查样本帧（js/sync.js 的 frameIndexAt），「画面这一帧」和「检测那一帧」用同一条时间轴。
+let lastMediaTime = null; // 最近一次真正上屏帧的时间戳（暂停时切换开关也要用它重画）
+
+// 把一帧画到画布上：先画画面里的其他人（暗灰），再画主体（蓝线 + 橙点），主体保持视觉主导
+function paintOverlay(ctx, frame, opts) {
+  ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  for (const lm of frame?.others ?? []) {
+    drawFrame(ctx, lm, { ...opts, tone: "other", clear: false, showAngles: false });
+  }
+  if (frame?.landmarks) {
+    drawFrame(ctx, frame.landmarks, { ...opts, tone: "subject", clear: false });
+  }
+}
+
+function overlayOpts() {
+  return {
+    showSkeleton: $("tg-skeleton").checked,
+    showJoints: $("tg-joints").checked,
+    showAngles: $("tg-angles").checked,
+    side: chosenSide,
+  };
+}
+
 function ensureRenderLoop() {
+  // 先画一帧：分析刚结束时视频是暂停的，rVFC 不会触发，得先把当前帧画出来
+  drawOverlayAt(video.currentTime);
   if (loopRunning) return;
   loopRunning = true;
-  const dt = 1 / SAMPLE_FPS;
-  const draw = () => {
-    if (frames.length) {
-      const idx = Math.max(0, Math.min(frames.length - 1, Math.round(video.currentTime / dt)));
-      drawFrame(octx, frames[idx]?.landmarks ?? null, {
-        showSkeleton: $("tg-skeleton").checked,
-        showJoints: $("tg-joints").checked,
-        showAngles: $("tg-angles").checked,
-        side: chosenSide,
-      });
-    }
-    requestAnimationFrame(draw);
+  if (supportsFrameCallback(video)) {
+    startFrameCallbackLoop();
+  } else {
+    // 不支持 rVFC 的浏览器退回旧驱动方式（帧号仍然按媒体时间查，不再按 currentTime 猜）
+    startAnimationLoop();
+  }
+}
+
+// 按媒体时间画一帧：媒体时间来自真正上屏的那一帧（rVFC），不是播放时钟
+function drawOverlayAt(mediaTime) {
+  if (typeof mediaTime === "number" && Number.isFinite(mediaTime)) lastMediaTime = mediaTime;
+  if (!frames.length) return;
+  const mt = lastMediaTime ?? video.currentTime;
+  const idx = frameIndexAt(frames, mt);
+  paintOverlay(octx, frames[idx], overlayOpts());
+}
+
+// 换源后旧的 rVFC 回调可能失效，用 token 作废旧链，只保留一条
+let renderToken = 0;
+
+function startFrameCallbackLoop() {
+  const token = ++renderToken;
+  // rVFC 回调与「这一帧上屏」是同一时刻：在回调里画，骨架和真人就是同一帧
+  const step = (_now, meta) => {
+    if (token !== renderToken) return;
+    drawOverlayAt(meta?.mediaTime ?? video.currentTime);
+    video.requestVideoFrameCallback(step);
   };
-  requestAnimationFrame(draw);
+  video.requestVideoFrameCallback(step);
+}
+
+function startAnimationLoop() {
+  const token = ++renderToken;
+  const loop = () => {
+    if (token !== renderToken) return;
+    drawOverlayAt(video.currentTime);
+    requestAnimationFrame(loop);
+  };
+  requestAnimationFrame(loop);
+}
+
+// 暂停时视频不再上屏、rVFC 不再触发，但开关还是要立刻有反应：
+// 用最近一次的上屏时间戳重画一次。
+for (const id of ["tg-skeleton", "tg-joints", "tg-angles"]) {
+  $(id).addEventListener("change", () => {
+    if (!frames.length) return;
+    const mt = lastMediaTime ?? video.currentTime;
+    paintOverlay(octx, frames[frameIndexAt(frames, mt)], overlayOpts());
+  });
 }
 
 $("btn-play").addEventListener("click", () => {
@@ -293,7 +366,8 @@ function runReport(archive = true) {
   if (quality.level === "bad") {
     // 素材不合格就不出评分报告：一份看起来很正式的评分会让用户把噪声当成结论
     // 素材质量卡片直接放进报告区顶部：摘要、质量、结论在同一个块里说，不在页面上下两处各说一遍
-    body.innerHTML = qualityCardHTML(quality)
+    body.innerHTML = subjectEndNote()
+      + qualityCardHTML(quality)
       + (cycle
         ? '<p class="report-empty">这段素材的拍摄条件不足以给出可信读数，已暂停生成评分报告——按上面卡片里的建议重拍一段再试。</p>'
         : '<p class="report-empty">未能检测到明显的出手动作（需要手腕高于肩部的瞬间）。请确认视频包含完整的投篮过程：持球 → 下蹲 → 出手 → 跟随。</p>')
@@ -309,8 +383,8 @@ function runReport(archive = true) {
   }
   if (!cycle) {
     // 没有出手动作 → 读数只能作参考（同一条出口，不出分数）
-    body.innerHTML =
-      `<div class="report-head"><p class="summary-line">${esc(summaryLineText(summaryArgs(0)))}</p>` +
+    body.innerHTML = subjectEndNote()
+      + `<div class="report-head"><p class="summary-line">${esc(summaryLineText(summaryArgs(0)))}</p>` +
       `<div class="report-noscore"><b>⚠️ 这次读数只能作参考</b><ul><li>没有检测到完整的投篮动作（需要手腕高于肩部的瞬间），读数仅供参考</li></ul></div></div>`
       + '<p class="report-empty">未能检测到明显的出手动作（需要手腕高于肩部的瞬间）。请确认视频包含完整的投篮过程：持球 → 下蹲 → 出手 → 跟随。</p>'
       + (validRatio < 0.3
@@ -364,9 +438,24 @@ function runReport(archive = true) {
     // 移动/接球场景是实验性功能，结论要打上醒目提示
     experimental: sceneId === "moving" || sceneId === "catch",
   });
+  body.insertAdjacentHTML("afterbegin", subjectEndNote());
   renderGapCard(body);
   body.scrollIntoView({ behavior: "smooth", block: "start" });
   updateFusionUI();
+}
+
+// v5.10：主体跟拍到哪里结束——「主体跟到 9.7 秒，之后画面里是其他人」。
+// 主体跟完了整段视频时不加这句（没有可说的就别说）。
+function subjectEndNote() {
+  const to = subjectInfo?.track?.stats?.to;
+  if (!Number.isFinite(to)) return "";
+  const lastT = frames.length ? frames[frames.length - 1].t : to;
+  if (to >= lastT - 0.3) return ""; // 主体跟完了整段视频（或只差最后几帧），不用多说什么
+  const hasOther = frames.some((f) => f.t > to + 1e-3 && (f.others?.length ?? 0) > 0);
+  const text = hasOther
+    ? `主体跟到 ${to.toFixed(1)} 秒，之后画面里是其他人。`
+    : `主体跟到 ${to.toFixed(1)} 秒，之后画面里没有再跟拍到这个人。`;
+  return `<p class="report-note">${text}</p>`;
 }
 
 // 摘要行的参数：把运行态（机位判定、主体选取、帧的账）交给 report.js 的纯函数拼成那一行
@@ -497,9 +586,14 @@ async function runCompare() {
     $("btn-compare").disabled = false;
     return;
   }
-  refFrames = await scanInto(refVideo, landmarker, (p) => {
+  const refScan = await scanInto(refVideo, landmarker, (p) => {
     $("cmp-status").textContent = `识别参考视频… ${Math.round(p * 100)}%`;
   }, (n) => { $("cmp-status").textContent = `⚠️ ${n}`; });
+  // 参考视频同样走「主体提取」：refFrames 需要 landmarks（画叠加层用）与 pt（帧级硬绑定）
+  const refApplied = applySubject(refScan, buildTracks(refScan));
+  refFrames = refApplied.frames;
+  refFrames.peopleSeen = refScan.peopleSeen;
+  refFrames.failedFrames = refScan.failedFrames;
 
   const refDetect = detectShotCycles(refFrames, pickSide(refFrames), SAMPLE_FPS);
   let refSide = refDetect.side;
@@ -562,30 +656,13 @@ function startDualPlayback(mapAtoB, refCycle, refSide) {
     { once: true }
   );
 
+  dualState.mapAtoB = mapAtoB;
+  dualState.refCycle = refCycle;
+  dualState.refSide = refSide;
+
   if (!dualRunning) {
     dualRunning = true;
-    const dt = 1 / SAMPLE_FPS;
-    const tick = () => {
-      if (refFrames.length && lastCycle && !$("dual-pane").classList.contains("hidden")) {
-        const g = Math.round(dualMy.currentTime / dt);
-        const a = Math.max(0, Math.min(mapAtoB.length - 1, g - lastCycle.crouchIdx));
-        const rg = refCycle.crouchIdx + mapAtoB[a];
-        const target = refFrames[rg]?.t ?? 0;
-        if (Math.abs(refVideo.currentTime - target) > 0.08) refVideo.currentTime = target;
-        drawFrame(
-          dualMyCtx,
-          frames[Math.max(0, Math.min(frames.length - 1, g))]?.landmarks ?? null,
-          { showSkeleton: true, showJoints: true, showAngles: false, side: chosenSide }
-        );
-        drawFrame(
-          refCtx,
-          refFrames[Math.max(0, Math.min(refFrames.length - 1, rg))]?.landmarks ?? null,
-          { showSkeleton: true, showJoints: true, showAngles: false, side: refSide }
-        );
-      }
-      requestAnimationFrame(tick);
-    };
-    requestAnimationFrame(tick);
+    startDualLoops();
   }
 
   $("btn-dual-play").onclick = () => {
@@ -598,6 +675,62 @@ function startDualPlayback(mapAtoB, refCycle, refSide) {
       $("btn-dual-play").textContent = "▶ 同步播放";
     }
   };
+}
+
+// 双窗播放状态（映射表 + 参考视频的出手周期/侧）
+const dualState = { mapAtoB: null, refCycle: null, refSide: "right" };
+
+/**
+ * 双窗对比：两侧叠加层都由「真正上屏那一帧」驱动（rVFC 的 mediaTime），
+ * 帧号一律用 frameIndexAt 查——不再用 Math.round(currentTime / dt) 猜。
+ * 左侧（我的动作）播放时按 DTW 映射去 seek 参考视频；参考视频是程序 seek 的，
+ * 它自己的叠加层用参考视频的上屏时间戳取帧。
+ */
+function startDualLoops() {
+  const dualOpts = { showSkeleton: true, showJoints: true, showAngles: false };
+  const drawDualMy = (mediaTime) => {
+    const mt = mediaTime ?? dualMy.currentTime;
+    const g = frameIndexAt(frames, mt);
+    if (frames.length && lastCycle && refFrames.length && !$("dual-pane").classList.contains("hidden")) {
+      const map = dualState.mapAtoB ?? [];
+      const a = Math.max(0, Math.min(map.length - 1, g - lastCycle.crouchIdx));
+      const rg = (dualState.refCycle?.crouchIdx ?? 0) + (map[a] ?? 0);
+      // 参考视频要跳到的那一帧：优先用真正上屏的时间戳（pt），没有才用采样时刻
+      const target = refFrames[rg]?.pt ?? refFrames[rg]?.t ?? 0;
+      if (Math.abs(refVideo.currentTime - target) > 0.08) refVideo.currentTime = target;
+    }
+    paintOverlay(dualMyCtx, frames[g], { ...dualOpts, side: chosenSide });
+  };
+  const drawDualRef = (mediaTime) => {
+    const mt = mediaTime ?? refVideo.currentTime;
+    paintOverlay(refCtx, refFrames[frameIndexAt(refFrames, mt)], { ...dualOpts, side: dualState.refSide });
+  };
+  if (supportsFrameCallback(dualMy)) {
+    const myStep = (_now, meta) => {
+      drawDualMy(meta?.mediaTime);
+      dualMy.requestVideoFrameCallback(myStep);
+    };
+    dualMy.requestVideoFrameCallback(myStep);
+  } else {
+    const loop = () => {
+      drawDualMy(dualMy.currentTime);
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+  }
+  if (supportsFrameCallback(refVideo)) {
+    const refStep = (_now, meta) => {
+      drawDualRef(meta?.mediaTime);
+      refVideo.requestVideoFrameCallback(refStep);
+    };
+    refVideo.requestVideoFrameCallback(refStep);
+  } else {
+    const loop = () => {
+      drawDualRef(refVideo.currentTime);
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+  }
 }
 
 ﻿// ---------- 6. 训练档案（纵向追踪） ----------
@@ -836,6 +969,7 @@ function scanInto(el, landmarker, onProgress, onNote) {
 
 async function scanIntoInner(el, landmarker, onProgress, onNote) {
   beginScan(landmarker); // 重置 VIDEO 模式跟踪状态：同一视频两次扫描相互独立
+  seekOffset = null; // 每次扫描重新测这个视频的栅格偏移（不同视频的帧栅格未必一样）
   const out = [];
   const span = Math.min(el.duration || 0, MAX_SECONDS);
   const dt = 1 / SAMPLE_FPS;
@@ -852,7 +986,11 @@ async function scanIntoInner(el, landmarker, onProgress, onNote) {
   const normalizePoses = (list) =>
     (list ?? []).filter((lm) => Array.isArray(lm) && lm.length >= 29);
   for (let t = 0; t < span; t += dt) {
-    await seekOn(el, t);
+    // pt = 这一帧真正上屏的时间戳；
+    // 拿不到真值时用「名义时刻 + 已测得的栅格偏移」回退，而不是直接用名义时刻——
+    // 栅格偏个 1.7 毫秒，播放时按时间轴查样本就会跳到前一帧（骨架画到前一帧的人身上）。
+    const mt = await seekOn(el, t);
+    const pt = mt != null ? mt : (seekOffset != null ? t + seekOffset : t);
     inferCtx.drawImage(el, 0, 0, inferCanvas.width, inferCanvas.height);
     let poses = [];
     try {
@@ -876,7 +1014,7 @@ async function scanIntoInner(el, landmarker, onProgress, onNote) {
     // 多人提示只统计「像真人」的姿态（占画面高度 ≥15%），避免幽灵/误检把单人视频报成多人
     const credible = poses.filter((lm) => (poseBodyHeight(lm) ?? 0) >= 0.15).length;
     if (credible > peopleSeen) peopleSeen = credible;
-    out.push({ t, poses, aspect });
+    out.push({ t, pt, poses, aspect });
     if (out.length % 5 === 0) {
       onProgress?.(span ? t / span : 1);
       await nextTick(); // 让出主线程，避免页面卡死
@@ -889,24 +1027,73 @@ async function scanIntoInner(el, landmarker, onProgress, onNote) {
   return out;
 }
 
+/**
+ * 跳到 t 并等这一帧真正上屏。
+ * v5.10：resolve 时一并返回「真正上屏那一帧」的时间戳（rVFC 的 metadata.mediaTime），
+ * 这样「检测用的采样帧」和「视频帧」有了硬绑定——叠加层才能按同一条时间轴取骨架。
+ *
+ * v5.10.1：改成「先注册 requestVideoFrameCallback，再设置 currentTime」。
+ * 旧写法（先等 seeked 再注册）注册时新帧往往已经上屏，rVFC 要等下一次上屏才触发；
+ * 而扫描时视频是暂停的，下一次上屏迟迟不来——于是大约一半的 seek 走 120ms 超时回退，
+ * 只能拿到名义采样时刻 t。
+ *
+ * 注册在 seek 之前，回调有可能对应「seek 之前就上屏的旧帧」，所以同时监听 'seeked'：
+ * 只有 'seeked' 之后才接受 rVFC 的 mediaTime；rVFC 先到就重新注册一次继续等
+ * （每次注册都要在回调里判断 'seeked' 是否已经发生，没发生就再注册一次）。
+ *
+ * 不支持 rVFC 的浏览器返回 null（调用方回退用采样时刻 t）。
+ */
 function seekOn(el, t) {
   return new Promise((resolve) => {
-    const onSeeked = async () => {
+    let settled = false;
+    let seeked = false;
+    let attempts = 0;
+    const TIMEOUT = 120;   // 兜底：拿不到就返回 null，行为与旧版一致
+    const MAX_REARM = 8;   // 兜底：旧帧反复先到时的重挂次数上限
+    const target = Math.min(t, Math.max(0, (el.duration || 0) - 0.05));
+
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       el.removeEventListener("seeked", onSeeked);
-      // 等待新帧真正上屏再取，避免旧帧/黑帧：优先 requestVideoFrameCallback
-      //（拿到的是浏览器确认 present 的帧）；不支持时退回双 rAF
+      resolve(value);
+    };
+
+    const onSeeked = () => { seeked = true; };
+
+    const arm = () => {
+      if (settled) return;
       if (typeof el.requestVideoFrameCallback === "function") {
-        let done = false;
-        const timer = setTimeout(() => { if (!done) { done = true; resolve(); } }, 120);
-        el.requestVideoFrameCallback(() => { if (!done) { done = true; clearTimeout(timer); resolve(); } });
+        el.requestVideoFrameCallback((_now, meta) => {
+          if (settled) return;
+          if (!seeked) {
+            // 这一帧是 seek 之前就上屏的旧帧：不算数，重新注册等下一次上屏
+            if (++attempts > MAX_REARM) { finish(null); return; }
+            setTimeout(arm, 0);
+            return;
+          }
+          const mt = meta?.mediaTime;
+          if (typeof mt === "number" && Number.isFinite(mt)) {
+            // 帧时间戳栅格相对名义采样时刻的偏移（同一视频里是常量）：拿不到真值时按它回退
+            seekOffset = mt - target;
+            finish(mt);
+          } else {
+            finish(null);
+          }
+        });
       } else {
-        await nextTick();
-        await nextTick();
-        resolve();
+        // 不支持 rVFC 的浏览器：等 seeked 之后再稳定两拍，回退用采样时刻 t
+        el.addEventListener("seeked", () => {
+          nextTick().then(() => nextTick()).then(() => finish(null));
+        }, { once: true });
       }
     };
+
+    const timer = setTimeout(() => finish(null), TIMEOUT);
     el.addEventListener("seeked", onSeeked);
-    el.currentTime = Math.min(t, Math.max(0, (el.duration || 0) - 0.05));
+    arm(); // 先注册 rVFC 再 seek：注册晚一步就抓不到这次 seek 上屏的那一帧
+    el.currentTime = target;
   });
 }
 
